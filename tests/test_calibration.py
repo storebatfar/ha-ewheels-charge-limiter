@@ -48,11 +48,25 @@ def test_update_clamps_an_absurd_observation_high():
     assert result == pytest.approx(16.0)
 
 
-def test_update_clamps_an_absurd_observation_low():
+def test_update_damps_an_absurdly_low_observation():
+    """A single bad reading cannot drag the estimate far; the EMA sees to that.
+
+    The low clamp is unreachable in one step: from 8.0 the most a single
+    update can remove is 30%, landing at 5.6, well above the 4.0 floor.
+    """
     result = update_wh_per_percent(
         current=8.0, seed=8.0, delivered_wh=1.0, start_soc=30.0, end_soc=80.0
     )
-    assert result == pytest.approx(4.0)
+    assert result == pytest.approx(5.606)
+
+
+def test_repeated_absurd_observations_are_clamped_at_the_floor():
+    value = 8.0
+    for _ in range(50):
+        value = update_wh_per_percent(
+            current=value, seed=8.0, delivered_wh=1.0, start_soc=30.0, end_soc=80.0
+        )
+    assert value == pytest.approx(4.0)
 
 
 def test_repeated_updates_converge_toward_the_observation():
