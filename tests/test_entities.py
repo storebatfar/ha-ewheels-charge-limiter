@@ -15,7 +15,6 @@ from pytest_homeassistant_custom_component.common import (
 from custom_components.ewheels_charge_limiter.const import (
     CONF_CAPACITY_WH,
     CONF_ENERGY_ENTITY,
-    CONF_PLUG_DEVICE,
     CONF_PLUG_SWITCH,
     CONF_POWER_ENTITY,
     CONF_SOC_ENTITY,
@@ -48,7 +47,6 @@ async def _setup(hass: HomeAssistant) -> MockConfigEntry:
         unique_id="plug-1",
         title="Scooter",
         data={
-            CONF_PLUG_DEVICE: "plug-1",
             CONF_PLUG_SWITCH: PLUG,
             CONF_POWER_ENTITY: POWER,
             CONF_ENERGY_ENTITY: ENERGY,

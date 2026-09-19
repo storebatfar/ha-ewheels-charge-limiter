@@ -7,7 +7,6 @@ from enum import StrEnum
 DOMAIN = "ewheels_charge_limiter"
 
 # Config entry keys
-CONF_PLUG_DEVICE = "plug_device"
 CONF_PLUG_SWITCH = "plug_switch"
 CONF_POWER_ENTITY = "power_entity"
 CONF_ENERGY_ENTITY = "energy_entity"

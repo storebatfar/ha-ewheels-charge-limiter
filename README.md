@@ -99,6 +99,12 @@ HACS → three-dot menu → **Custom repositories** → add this repository with
 category **Integration**. Install, restart Home Assistant, then
 **Settings → Devices & Services → Add Integration → E-Wheels Charge Limiter**.
 
+Setup is a single screen asking for the plug's switch entity, its power and/or
+energy sensor, the battery's state-of-charge sensor, and the capacity in
+watt-hours. You name the entities outright rather than picking a device: it is
+one screen either way, and nothing is inferred behind your back about which
+switch gets to cut mains.
+
 ## Options
 
 | Option | Default |

@@ -18,7 +18,6 @@ from homeassistant.helpers import selector
 from .const import (
     CONF_CAPACITY_WH,
     CONF_ENERGY_ENTITY,
-    CONF_PLUG_DEVICE,
     CONF_PLUG_SWITCH,
     CONF_POWER_ENTITY,
     CONF_SOC_ENTITY,
@@ -37,12 +36,19 @@ from .const import (
     OPT_TARGET_SOC,
     OPT_WH_PER_PERCENT,
 )
-from .plug_resolver import resolve_plug_entities
 
 USER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_NAME, default="Scooter"): selector.TextSelector(),
-        vol.Required(CONF_PLUG_DEVICE): selector.DeviceSelector(),
+        vol.Required(CONF_PLUG_SWITCH): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="switch")
+        ),
+        vol.Optional(CONF_POWER_ENTITY): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor", device_class="power")
+        ),
+        vol.Optional(CONF_ENERGY_ENTITY): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor", device_class="energy")
+        ),
         vol.Required(CONF_SOC_ENTITY): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="sensor", device_class="battery")
         ),
@@ -59,32 +65,6 @@ USER_SCHEMA = vol.Schema(
 )
 
 
-def _entities_schema(defaults: dict[str, Any]) -> vol.Schema:
-    """Schema for the fallback step, pre-filled with whatever we resolved."""
-    return vol.Schema(
-        {
-            vol.Required(
-                CONF_PLUG_SWITCH,
-                default=defaults.get(CONF_PLUG_SWITCH, vol.UNDEFINED),
-            ): selector.EntitySelector(
-                selector.EntitySelectorConfig(domain="switch")
-            ),
-            vol.Optional(
-                CONF_POWER_ENTITY,
-                default=defaults.get(CONF_POWER_ENTITY, vol.UNDEFINED),
-            ): selector.EntitySelector(
-                selector.EntitySelectorConfig(domain="sensor", device_class="power")
-            ),
-            vol.Optional(
-                CONF_ENERGY_ENTITY,
-                default=defaults.get(CONF_ENERGY_ENTITY, vol.UNDEFINED),
-            ): selector.EntitySelector(
-                selector.EntitySelectorConfig(domain="sensor", device_class="energy")
-            ),
-        }
-    )
-
-
 def _default_options() -> dict[str, Any]:
     return {
         OPT_TARGET_SOC: DEFAULT_TARGET_SOC,
@@ -97,69 +77,47 @@ def _default_options() -> dict[str, Any]:
 
 
 class EWheelsChargeLimiterConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle a config flow."""
+    """Handle a config flow.
+
+    Everything is asked for explicitly on one screen. An earlier design picked
+    a plug *device* and inferred its entities, but that made the device a
+    redundant extra concept and, worse, hid which switch had been chosen to
+    cut mains. Naming the entities outright is shorter and honest.
+    """
 
     VERSION = 1
-
-    def __init__(self) -> None:
-        self._data: dict[str, Any] = {}
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Pick the plug, the state-of-charge sensor and the capacity."""
-        if user_input is None:
-            return self.async_show_form(step_id="user", data_schema=USER_SCHEMA)
+        """Collect the plug entities, the battery, and its capacity."""
+        errors: dict[str, str] = {}
 
-        await self.async_set_unique_id(user_input[CONF_PLUG_DEVICE])
-        self._abort_if_unique_id_configured()
+        if user_input is not None:
+            if not user_input.get(CONF_POWER_ENTITY) and not user_input.get(
+                CONF_ENERGY_ENTITY
+            ):
+                # Without a meter there is nothing to count, so the watt-hour
+                # projection could never terminate.
+                errors["base"] = "no_meter"
+            else:
+                # The switch is what we actually control, so it is the natural
+                # identity for this entry.
+                await self.async_set_unique_id(user_input[CONF_PLUG_SWITCH])
+                self._abort_if_unique_id_configured()
 
-        self._data = dict(user_input)
+                return self.async_create_entry(
+                    title=user_input[CONF_NAME],
+                    data=user_input,
+                    options=_default_options(),
+                )
 
-        resolved = resolve_plug_entities(self.hass, user_input[CONF_PLUG_DEVICE])
-        self._data[CONF_PLUG_SWITCH] = resolved.switch
-        self._data[CONF_POWER_ENTITY] = resolved.power
-        self._data[CONF_ENERGY_ENTITY] = resolved.energy
-
-        if not resolved.is_complete:
-            return await self.async_step_entities()
-
-        return self._create()
-
-    async def async_step_entities(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Ask for entities the resolver could not pin down."""
-        if user_input is None:
-            defaults = {
-                key: value
-                for key, value in self._data.items()
-                if key in (CONF_PLUG_SWITCH, CONF_POWER_ENTITY, CONF_ENERGY_ENTITY)
-                and value is not None
-            }
-            return self.async_show_form(
-                step_id="entities", data_schema=_entities_schema(defaults)
-            )
-
-        if not user_input.get(CONF_POWER_ENTITY) and not user_input.get(
-            CONF_ENERGY_ENTITY
-        ):
-            return self.async_show_form(
-                step_id="entities",
-                data_schema=_entities_schema(user_input),
-                errors={"base": "no_meter"},
-            )
-
-        self._data[CONF_PLUG_SWITCH] = user_input[CONF_PLUG_SWITCH]
-        self._data[CONF_POWER_ENTITY] = user_input.get(CONF_POWER_ENTITY)
-        self._data[CONF_ENERGY_ENTITY] = user_input.get(CONF_ENERGY_ENTITY)
-        return self._create()
-
-    def _create(self) -> ConfigFlowResult:
-        return self.async_create_entry(
-            title=self._data[CONF_NAME],
-            data=self._data,
-            options=_default_options(),
+        return self.async_show_form(
+            step_id="user",
+            data_schema=self.add_suggested_values_to_schema(
+                USER_SCHEMA, user_input or {}
+            ),
+            errors=errors,
         )
 
     @staticmethod

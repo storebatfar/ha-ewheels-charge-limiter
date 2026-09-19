@@ -3,21 +3,14 @@
     "step": {
       "user": {
         "title": "E-Wheels Charge Limiter",
-        "description": "Pick the power-monitoring smart plug your charger is on, and the sensor that reports the battery's state of charge.",
+        "description": "Pick the switch that cuts power to the charger, at least one meter on that plug, and the sensor that reports the battery's state of charge.",
         "data": {
           "name": "Name",
-          "plug_device": "Smart plug",
-          "soc_entity": "State of charge sensor",
-          "capacity_wh": "Battery capacity (Wh)"
-        }
-      },
-      "entities": {
-        "title": "Plug entities",
-        "description": "The plug's entities could not be identified automatically. Pick the switch that cuts power, and at least one meter.",
-        "data": {
           "plug_switch": "Plug switch",
           "power_entity": "Power sensor",
-          "energy_entity": "Energy sensor"
+          "energy_entity": "Energy sensor",
+          "soc_entity": "State of charge sensor",
+          "capacity_wh": "Battery capacity (Wh)"
         }
       }
     },
