@@ -21,9 +21,3 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
-          # "brands" only gates inclusion in the HACS *default* repository
-          # list, which needs either brand assets here or a pull request to
-          # home-assistant/brands. Installing this as a custom repository does
-          # not require it. Drop this ignore if the integration is ever
-          # submitted for default inclusion.
-          ignore: brands

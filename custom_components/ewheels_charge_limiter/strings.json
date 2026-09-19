@@ -10,12 +10,23 @@
           "power_entity": "Power sensor",
           "energy_entity": "Energy sensor",
           "soc_entity": "State of charge sensor",
-          "capacity_wh": "Battery capacity (Wh)"
+          "capacity_wh": "Battery capacity (Wh)",
+          "allow_foreign_meter": "Use this meter anyway"
+        },
+        "data_description": {
+          "name": "Used to name the entities, for example \"Scooter Status\".",
+          "plug_switch": "The switch that cuts mains to the charger.",
+          "power_entity": "Instantaneous power on that plug, in watts. Used to detect that charging has started, and to count energy if there is no energy sensor.",
+          "energy_entity": "Cumulative energy on that plug. Preferred over the power sensor when both exist, because it is exact.",
+          "soc_entity": "Battery percentage. Read just before a charge starts; it does not need to update during charging.",
+          "capacity_wh": "Usable pack capacity. Only used to seed the estimate, which then corrects itself over the first few charges.",
+          "allow_foreign_meter": "Tick only if the meter really does measure this charger, for example a separate clamp meter."
         }
       }
     },
     "error": {
-      "no_meter": "Pick a power sensor, an energy sensor, or both. Without a meter there is nothing to count."
+      "no_meter": "Pick a power sensor, an energy sensor, or both. Without a meter there is nothing to count.",
+      "meter_not_on_plug": "That meter belongs to a different device than the switch, so it is probably not measuring the charger. Counting the wrong watt-hours would cut the charge at an arbitrary point. Pick a meter on the same plug, or tick the box below if you are sure."
     },
     "abort": {
       "already_configured": "This plug is already configured."

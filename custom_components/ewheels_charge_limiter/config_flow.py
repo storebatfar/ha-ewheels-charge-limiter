@@ -12,10 +12,12 @@ from homeassistant.config_entries import (
     OptionsFlow,
 )
 from homeassistant.const import CONF_NAME
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import selector
 
 from .const import (
+    CONF_ALLOW_FOREIGN_METER,
     CONF_CAPACITY_WH,
     CONF_ENERGY_ENTITY,
     CONF_PLUG_SWITCH,
@@ -65,6 +67,39 @@ USER_SCHEMA = vol.Schema(
 )
 
 
+def _device_of(hass: HomeAssistant, entity_id: str | None) -> str | None:
+    """The device an entity belongs to, or None if it has none."""
+    if not entity_id:
+        return None
+    entry = er.async_get(hass).async_get(entity_id)
+    return entry.device_id if entry else None
+
+
+def _meter_on_another_device(
+    hass: HomeAssistant,
+    plug_switch: str,
+    power: str | None,
+    energy: str | None,
+) -> bool:
+    """True when a chosen meter demonstrably belongs to a different device.
+
+    A meter that is not measuring the plug it switches counts watt-hours that
+    have nothing to do with the charger, so the cutoff fires at an arbitrary
+    point. Only flagged when both devices are known and differ: template and
+    helper sensors have no device, and a separate clamp meter is a legitimate
+    setup, so an unknown device is never treated as wrong.
+    """
+    switch_device = _device_of(hass, plug_switch)
+    if switch_device is None:
+        return False
+
+    return any(
+        (meter_device := _device_of(hass, meter)) is not None
+        and meter_device != switch_device
+        for meter in (power, energy)
+    )
+
+
 def _default_options() -> dict[str, Any]:
     return {
         OPT_TARGET_SOC: DEFAULT_TARGET_SOC,
@@ -92,14 +127,23 @@ class EWheelsChargeLimiterConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Collect the plug entities, the battery, and its capacity."""
         errors: dict[str, str] = {}
+        offer_override = False
 
         if user_input is not None:
-            if not user_input.get(CONF_POWER_ENTITY) and not user_input.get(
-                CONF_ENERGY_ENTITY
-            ):
+            power = user_input.get(CONF_POWER_ENTITY)
+            energy = user_input.get(CONF_ENERGY_ENTITY)
+
+            if not power and not energy:
                 # Without a meter there is nothing to count, so the watt-hour
                 # projection could never terminate.
                 errors["base"] = "no_meter"
+            elif not user_input.get(CONF_ALLOW_FOREIGN_METER) and (
+                _meter_on_another_device(
+                    self.hass, user_input[CONF_PLUG_SWITCH], power, energy
+                )
+            ):
+                errors["base"] = "meter_not_on_plug"
+                offer_override = True
             else:
                 # The switch is what we actually control, so it is the natural
                 # identity for this entry.
@@ -108,15 +152,29 @@ class EWheelsChargeLimiterConfigFlow(ConfigFlow, domain=DOMAIN):
 
                 return self.async_create_entry(
                     title=user_input[CONF_NAME],
-                    data=user_input,
+                    data={
+                        key: value
+                        for key, value in user_input.items()
+                        if key != CONF_ALLOW_FOREIGN_METER
+                    },
                     options=_default_options(),
                 )
 
+        schema = USER_SCHEMA
+        if offer_override:
+            # Only surfaced once the mismatch has been pointed out, so the
+            # normal path stays a plain form.
+            schema = schema.extend(
+                {
+                    vol.Optional(
+                        CONF_ALLOW_FOREIGN_METER, default=False
+                    ): selector.BooleanSelector()
+                }
+            )
+
         return self.async_show_form(
             step_id="user",
-            data_schema=self.add_suggested_values_to_schema(
-                USER_SCHEMA, user_input or {}
-            ),
+            data_schema=self.add_suggested_values_to_schema(schema, user_input or {}),
             errors=errors,
         )
 

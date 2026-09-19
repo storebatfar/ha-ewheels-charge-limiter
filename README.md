@@ -127,3 +127,8 @@ limit is the point of this, not the tariff.
 ## Licence
 
 MIT.
+
+The icon in `custom_components/ewheels_charge_limiter/brand/` is a third-party
+asset supplied by the repository owner and is not covered by the MIT licence
+above. If it came from a stock library such as Flaticon, attribution is
+probably required — replace this paragraph with the correct credit.

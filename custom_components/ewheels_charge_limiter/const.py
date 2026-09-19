@@ -13,6 +13,10 @@ CONF_ENERGY_ENTITY = "energy_entity"
 CONF_SOC_ENTITY = "soc_entity"
 CONF_CAPACITY_WH = "capacity_wh"
 
+# Config-flow only; never stored on the entry. Lets the user accept a meter
+# that lives on a different device from the switch.
+CONF_ALLOW_FOREIGN_METER = "allow_foreign_meter"
+
 # Option keys
 OPT_TARGET_SOC = "target_soc"
 OPT_REARM_HYSTERESIS = "rearm_hysteresis"
