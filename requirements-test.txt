@@ -1,0 +1,5 @@
+# pytest, pytest-asyncio, freezegun and homeassistant itself all arrive as
+# pinned dependencies of the harness. Pinning them here as well only creates
+# conflicts, so don't.
+pytest-homeassistant-custom-component==0.13.316
+ruff==0.16.8

@@ -1,0 +1,11 @@
+{
+  "domain": "ewheels_charge_limiter",
+  "name": "E-Wheels Charge Limiter",
+  "codeowners": ["@storebatfar"],
+  "config_flow": true,
+  "documentation": "https://github.com/storebatfar/ha-ewheels-charge-limiter",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/storebatfar/ha-ewheels-charge-limiter/issues",
+  "requirements": [],
+  "version": "2026.9.0"
+}
