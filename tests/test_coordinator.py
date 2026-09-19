@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
+from freezegun.api import FrozenDateTimeFactory
+from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant, ServiceCall
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from homeassistant.util import dt as dt_util
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+)
 
 from custom_components.ewheels_charge_limiter.const import (
     CONF_CAPACITY_WH,
@@ -146,3 +154,170 @@ async def test_a_reading_within_hysteresis_does_not_rearm(hass: HomeAssistant):
     hass.states.async_set(SOC, "78", {"unit_of_measurement": "%"})
     await hass.async_block_till_done()
     assert coordinator.state is ChargeState.COMPLETE
+
+
+async def test_manual_on_arms_even_above_target(hass: HomeAssistant):
+    """The override is an instruction, not a suggestion."""
+    coordinator = await _coordinator(hass)
+    hass.states.async_set(SOC, "95", {"unit_of_measurement": "%"})
+    await hass.async_block_till_done()
+
+    await coordinator.async_set_plug(False)
+    await hass.async_block_till_done()
+    assert coordinator.state is ChargeState.STOPPED
+
+    await coordinator.async_set_plug(True)
+    await hass.async_block_till_done()
+    assert coordinator.state is ChargeState.ARMED
+    assert hass.states.get(PLUG).state == "on"
+
+
+async def test_manual_off_stops_an_open_session(hass: HomeAssistant):
+    coordinator = await _coordinator(hass)
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    assert coordinator.state is ChargeState.CHARGING
+
+    await coordinator.async_set_plug(False)
+    await hass.async_block_till_done()
+    assert coordinator.state is ChargeState.STOPPED
+    assert hass.states.get(PLUG).state == "off"
+
+
+async def test_manual_stop_records_no_calibration(hass: HomeAssistant):
+    coordinator = await _coordinator(hass)
+    before = coordinator.wh_per_percent
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    hass.states.async_set(ENERGY, "0.3", {"unit_of_measurement": "kWh"})
+    await hass.async_block_till_done()
+
+    await coordinator.async_set_plug(False)
+    await hass.async_block_till_done()
+    hass.states.async_set(SOC, "75", {"unit_of_measurement": "%"})
+    await hass.async_block_till_done()
+
+    assert coordinator.wh_per_percent == before
+
+
+async def test_an_external_plug_change_drives_the_same_transition(
+    hass: HomeAssistant,
+):
+    """Someone pressed the button on the plug itself."""
+    coordinator = await _coordinator(hass)
+    hass.states.async_set(PLUG, "off")
+    await hass.async_block_till_done()
+    assert coordinator.state is ChargeState.STOPPED
+
+
+async def test_a_stale_soc_reading_disables_the_limit(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+):
+    coordinator = await _coordinator(hass, soc_staleness_hours=12)
+    freezer.tick(timedelta(hours=13))
+
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+
+    assert coordinator.state is ChargeState.UNCALIBRATED
+    assert coordinator.required_wh is None
+    assert hass.states.get(PLUG).state == "on"
+
+
+async def test_an_idle_period_closes_a_session(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+):
+    coordinator = await _coordinator(hass, idle_close_minutes=10)
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+
+    hass.states.async_set(POWER, "0", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    assert coordinator.state is ChargeState.CHARGING  # a dip is not an ending
+
+    freezer.tick(timedelta(minutes=11))
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert coordinator.state is ChargeState.ARMED
+
+
+async def test_an_idle_period_completes_an_uncalibrated_session(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+):
+    coordinator = await _coordinator(
+        hass, soc_staleness_hours=12, idle_close_minutes=10
+    )
+    freezer.tick(timedelta(hours=13))
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    assert coordinator.state is ChargeState.UNCALIBRATED
+
+    hass.states.async_set(POWER, "0", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    freezer.tick(timedelta(minutes=11))
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+
+    assert coordinator.state is ChargeState.COMPLETE
+    assert hass.states.get(PLUG).state == "off"
+
+
+async def test_the_max_session_cap_stalls_and_cuts(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+):
+    coordinator = await _coordinator(hass, max_session_hours=8)
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+
+    freezer.tick(timedelta(hours=9))
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+
+    assert coordinator.state is ChargeState.STALLED
+    assert hass.states.get(PLUG).state == "off"
+
+
+async def test_losing_every_meter_stalls_and_cuts(hass: HomeAssistant):
+    """Blind mid-session: continuing could mean never cutting at all."""
+    coordinator = await _coordinator(hass)
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    assert coordinator.state is ChargeState.CHARGING
+
+    hass.states.async_set(POWER, STATE_UNAVAILABLE)
+    hass.states.async_set(ENERGY, STATE_UNAVAILABLE)
+    await hass.async_block_till_done()
+
+    assert coordinator.state is ChargeState.STALLED
+    assert hass.states.get(PLUG).state == "off"
+
+
+async def test_losing_one_meter_keeps_going(hass: HomeAssistant):
+    """The energy sensor alone is enough to keep counting."""
+    coordinator = await _coordinator(hass)
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+
+    hass.states.async_set(POWER, STATE_UNAVAILABLE)
+    await hass.async_block_till_done()
+
+    assert coordinator.state is ChargeState.CHARGING
+
+
+async def test_a_session_survives_a_reload(hass: HomeAssistant, hass_storage):
+    coordinator = await _coordinator(hass)
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    hass.states.async_set(ENERGY, "0.2", {"unit_of_measurement": "kWh"})
+    await hass.async_block_till_done()
+    assert coordinator.session_delivered_wh == pytest.approx(200.0)
+
+    await coordinator.async_shutdown()
+
+    revived = ChargeLimiterCoordinator(hass, coordinator.entry)
+    await revived.async_setup()
+    await hass.async_block_till_done()
+
+    assert revived.state is ChargeState.CHARGING
+    assert revived.session_delivered_wh == pytest.approx(200.0)
+    assert revived.session_start_soc == pytest.approx(40.0)
