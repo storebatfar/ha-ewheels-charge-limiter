@@ -124,6 +124,21 @@ Price-based scheduling and solar-surplus charging are out of scope. For a
 price timing saves a fraction of a currency unit per charge. The longevity
 limit is the point of this, not the tariff.
 
+## A note on the icon
+
+The icon ships inside the integration at
+`custom_components/ewheels_charge_limiter/brand/`, which is the supported
+mechanism from Home Assistant 2026.3 onwards — Home Assistant serves it via its
+brands proxy, and the `home-assistant/brands` repository no longer accepts
+submissions for custom integrations.
+
+It therefore appears on the Integrations page, device pages and elsewhere in
+Home Assistant, but **not** in the HACS store listing. That is a known HACS bug
+([#5171](https://github.com/hacs/integration/issues/5171),
+[#5223](https://github.com/hacs/integration/issues/5223)): the HACS frontend
+still fetches icons from the brands CDN, which has no entry for inline-shipped
+icons. Nothing in this repository can change that.
+
 ## Licence
 
 MIT.
