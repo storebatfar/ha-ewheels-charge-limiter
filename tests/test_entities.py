@@ -30,7 +30,7 @@ ENERGY = "sensor.plug_energy"
 SOC = "sensor.scooter_battery"
 
 
-async def _setup(hass: HomeAssistant) -> MockConfigEntry:
+async def _setup(hass: HomeAssistant, power: bool = True) -> MockConfigEntry:
     """Bring up a real switch entity for the plug, then the integration."""
     setup_test_component_platform(hass, SWITCH_DOMAIN, [MockToggleEntity("Plug", "on")])
     assert await async_setup_component(
@@ -48,7 +48,7 @@ async def _setup(hass: HomeAssistant) -> MockConfigEntry:
         title="Scooter",
         data={
             CONF_PLUG_SWITCH: PLUG,
-            CONF_POWER_ENTITY: POWER,
+            **({CONF_POWER_ENTITY: POWER} if power else {}),
             CONF_ENERGY_ENTITY: ENERGY,
             CONF_SOC_ENTITY: SOC,
             CONF_CAPACITY_WH: 720,
@@ -81,6 +81,41 @@ async def test_wh_per_percent_sensor_reports_the_seed(hass: HomeAssistant):
     assert float(state.state) == pytest.approx(8.276, abs=0.01)
 
 
+async def test_charge_power_sensor_mirrors_the_plug(hass: HomeAssistant):
+    await _setup(hass)
+    assert hass.states.get("sensor.scooter_charge_power").state == "0.0"
+
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.scooter_charge_power").state == "120.0"
+
+
+async def test_charge_power_sensor_is_absent_without_a_power_meter(
+    hass: HomeAssistant,
+):
+    """An energy-only plug has no instantaneous reading to mirror."""
+    await _setup(hass, power=False)
+    assert hass.states.get("sensor.scooter_charge_power") is None
+
+
+async def test_charge_power_keeps_tracking_while_control_is_disabled(
+    hass: HomeAssistant,
+):
+    """It reports the plug, not the limiter, so turning control off cannot stale it."""
+    await _setup(hass)
+    await hass.services.async_call(
+        SWITCH_DOMAIN,
+        "turn_off",
+        {"entity_id": "switch.scooter_enabled"},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    hass.states.async_set(POWER, "75", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.scooter_charge_power").state == "75.0"
+
+
 async def test_status_sensor_follows_the_coordinator(hass: HomeAssistant):
     await _setup(hass)
     hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
@@ -97,6 +132,25 @@ async def test_plug_switch_reflects_the_real_plug(hass: HomeAssistant):
         SWITCH_DOMAIN, "turn_off", {"entity_id": PLUG}, blocking=True
     )
     await hass.async_block_till_done()
+    assert hass.states.get("switch.scooter_plug").state == "off"
+
+
+async def test_plug_switch_stays_off_while_armed_over_a_dead_plug(
+    hass: HomeAssistant,
+):
+    """Armed no longer implies energised, so the switch must follow the relay."""
+    await _setup(hass)
+    await hass.services.async_call(
+        SWITCH_DOMAIN, "turn_off", {"entity_id": PLUG}, blocking=True
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.scooter_status").state == "stopped"
+
+    # A low reading re-arms the limiter, but must not claim the plug is on.
+    hass.states.async_set(SOC, "60", {"unit_of_measurement": "%"})
+    await hass.async_block_till_done()
+
+    assert hass.states.get("sensor.scooter_status").state == "armed"
     assert hass.states.get("switch.scooter_plug").state == "off"
 
 
@@ -155,10 +209,15 @@ async def test_removing_the_entry_deletes_the_entities(hass: HomeAssistant):
     assert hass.states.get("sensor.scooter_status") is None
 
 
-async def test_changing_an_option_reloads_the_entry(hass: HomeAssistant):
+async def test_changing_an_option_applies_without_reloading(hass: HomeAssistant):
+    """Reloading would take every entity unavailable in the middle of a charge."""
     entry = await _setup(hass)
+    coordinator = entry.runtime_data
+
     hass.config_entries.async_update_entry(
         entry, options={**entry.options, OPT_TARGET_SOC: 70.0}
     )
     await hass.async_block_till_done()
+
     assert hass.states.get("number.scooter_target_charge").state == "70.0"
+    assert entry.runtime_data is coordinator

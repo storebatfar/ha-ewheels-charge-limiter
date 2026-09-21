@@ -12,7 +12,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfEnergy
+from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -62,6 +62,16 @@ SENSORS: tuple[ChargeLimiterSensorDescription, ...] = (
     ),
 )
 
+# Only meaningful when a power meter is configured, so it is not in SENSORS.
+CHARGE_POWER = ChargeLimiterSensorDescription(
+    key="charge_power",
+    translation_key="charge_power",
+    native_unit_of_measurement=UnitOfPower.WATT,
+    device_class=SensorDeviceClass.POWER,
+    state_class=SensorStateClass.MEASUREMENT,
+    value_fn=lambda c: c.charge_power_w,
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -70,8 +80,11 @@ async def async_setup_entry(
 ) -> None:
     """Set up the sensors."""
     coordinator: ChargeLimiterCoordinator = entry.runtime_data
+    descriptions = list(SENSORS)
+    if coordinator.power_entity_id:
+        descriptions.append(CHARGE_POWER)
     async_add_entities(
-        ChargeLimiterSensor(coordinator, description) for description in SENSORS
+        ChargeLimiterSensor(coordinator, description) for description in descriptions
     )
 
 

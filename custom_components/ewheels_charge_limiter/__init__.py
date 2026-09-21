@@ -20,7 +20,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: EWheelsConfigEntry) -> b
     entry.runtime_data = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
     return True
 
 
@@ -30,8 +29,3 @@ async def async_unload_entry(hass: HomeAssistant, entry: EWheelsConfigEntry) -> 
     if unloaded:
         await entry.runtime_data.async_shutdown()
     return unloaded
-
-
-async def async_reload_entry(hass: HomeAssistant, entry: EWheelsConfigEntry) -> None:
-    """Reload after an options change."""
-    await hass.config_entries.async_reload(entry.entry_id)

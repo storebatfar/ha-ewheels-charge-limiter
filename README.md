@@ -38,6 +38,10 @@ The practical consequence: **accuracy depends on a recent state-of-charge
 reading.** Power the device on before you plug it in and you will land close to
 the target.
 
+Changing the target mid-charge works: the requirement is re-measured against
+the new target straight away, and if more has already been delivered than the
+new target calls for, the plug is cut on the spot.
+
 ## Self-calibration
 
 Rather than assuming a charger efficiency, the integration learns **wall
@@ -71,12 +75,28 @@ There is exactly one deliberate exception. If **every** meter becomes
 unavailable mid-session, the count can never advance and the plug would stay
 live indefinitely, so the integration cuts power and reports `stalled`.
 
+## Starting a charge is yours; ending one is the integration's
+
+**The integration never switches the plug on.** Its authority runs one way: it
+cuts power at the target, at the session cap, and if every meter dies. Closing
+the relay is always a deliberate act by you.
+
+So `armed` means "watching, ready to limit the next charge" — not "powered up
+and waiting". Home Assistant restarting, an option being edited, or the battery
+falling below the re-arm threshold will all arm the limiter, and none of them
+will start a charge.
+
+The trade-off is worth stating plainly: after a charge completes the plug stays
+off, so plugging the scooter in overnight does nothing until you switch the plug
+on.
+
 ## The manual plug switch
 
 The `Plug` switch is an override, and it is authoritative. Turning it **on**
 starts a session regardless of the current charge — it deliberately bypasses
 the target, because "turn the plug on" should mean exactly that. Turning it
-**off** ends any open session.
+**off** ends any open session. It mirrors the real plug, so it reads `off`
+while the limiter is merely armed.
 
 Changes made anywhere else — the plug's own entity, its physical button, the
 vendor app — are detected and treated identically.
@@ -90,6 +110,7 @@ vendor app — are detected and treated identically.
 | `switch` Plug | Manual override, mirrors the real plug |
 | `sensor` Status | `idle`, `armed`, `charging`, `complete`, `stopped`, `uncalibrated`, `stalled` |
 | `sensor` Session energy | Watt-hours delivered this session |
+| `sensor` Charge power | What the plug is drawing right now; only when a power sensor is configured |
 | `sensor` Projected charge | Estimated charge right now |
 | `sensor` Wh per percent | The learned calibration |
 

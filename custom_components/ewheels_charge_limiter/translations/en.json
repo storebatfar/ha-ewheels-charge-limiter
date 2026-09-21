@@ -52,6 +52,7 @@
     "sensor": {
       "status": { "name": "Status" },
       "session_energy": { "name": "Session energy" },
+      "charge_power": { "name": "Charge power" },
       "projected_soc": { "name": "Projected charge" },
       "wh_per_percent": { "name": "Wh per percent" }
     },

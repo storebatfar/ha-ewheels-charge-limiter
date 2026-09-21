@@ -96,6 +96,11 @@ class ChargeLimiterCoordinator:
         self.wh_per_percent: float = float(
             entry.options.get(OPT_WH_PER_PERCENT) or self._seed
         )
+        # The override as last seen in the options, so a later edit can be told
+        # apart from the same value simply being present again.
+        self._options_wh_per_percent: float | None = entry.options.get(
+            OPT_WH_PER_PERCENT
+        )
 
         self._meter = EnergyMeter()
         self._pending_calibration: dict[str, float] | None = None
@@ -172,6 +177,30 @@ class ChargeLimiterCoordinator:
             return None
         return self.session_start_soc + self._meter.delivered_wh / self.wh_per_percent
 
+    @property
+    def power_entity_id(self) -> str | None:
+        """The configured power meter, if there is one."""
+        return self._power_entity
+
+    @property
+    def charge_power_w(self) -> float | None:
+        """What the plug is drawing right now, or None while it is unreadable."""
+        if self._power_entity is None:
+            return None
+        return _as_float(self.hass.states.get(self._power_entity))
+
+    @property
+    def plug_is_on(self) -> bool | None:
+        """The real plug's state, or None while it cannot be read.
+
+        Read straight from the switch rather than inferred from the state
+        machine: armed means watching, which says nothing about the relay.
+        """
+        state = self.hass.states.get(self._plug_switch)
+        if state is None or state.state in _INVALID:
+            return None
+        return state.state == "on"
+
     # ---- lifecycle -----------------------------------------------------
 
     async def async_setup(self) -> None:
@@ -187,6 +216,9 @@ class ChargeLimiterCoordinator:
 
         self._unsubscribes.append(
             async_track_state_change_event(self.hass, watched, self._handle_change)
+        )
+        self._unsubscribes.append(
+            self.entry.add_update_listener(self._async_options_updated)
         )
 
         if not self.enabled:
@@ -258,10 +290,10 @@ class ChargeLimiterCoordinator:
     # ---- commands ------------------------------------------------------
 
     async def async_set_target(self, value: float) -> None:
+        """Set the target. The options listener applies it, open session included."""
         self.hass.config_entries.async_update_entry(
             self.entry, options={**self.entry.options, OPT_TARGET_SOC: value}
         )
-        self._notify()
 
     async def async_set_enabled(self, on: bool) -> None:
         """Master enable. Turning off leaves the plug exactly as it is."""
@@ -282,10 +314,63 @@ class ChargeLimiterCoordinator:
         """
         await self._async_switch_plug(on)
 
+    async def _async_options_updated(
+        self, _hass: HomeAssistant, _entry: ConfigEntry
+    ) -> None:
+        """Apply an options change in place, without reloading the entry.
+
+        Every tuning option is read live off the entry, so a reload buys
+        nothing. It actively costs: it takes the entities unavailable
+        mid-charge and re-enters setup, which is a poor place to be holding a
+        running session.
+        """
+        self._apply_wh_per_percent_option()
+        self._restart_cap_timer()
+        await self._async_recompute_required_wh()
+        self._notify()
+
+    @callback
+    def _apply_wh_per_percent_option(self) -> None:
+        """Adopt a manual override of the calibration, if one has just been set.
+
+        Only on an actual change: re-applying the value already sitting in the
+        options on every unrelated edit would claw back everything the sessions
+        since have learned.
+        """
+        override = self.entry.options.get(OPT_WH_PER_PERCENT)
+        if override == self._options_wh_per_percent:
+            return
+        self._options_wh_per_percent = override
+        if override:
+            self.wh_per_percent = float(override)
+
+    async def _async_recompute_required_wh(self) -> None:
+        """Re-measure an open session against the current target.
+
+        The requirement is fixed at session open, so without this a target
+        changed mid-charge would silently do nothing until the next session -
+        and the charge would run on to the old target.
+
+        An uncalibrated session is deliberately left alone: it has no starting
+        point to measure from, which is exactly why it carries no limit.
+        """
+        if self.state is not ChargeState.CHARGING or self.session_start_soc is None:
+            return
+
+        self.required_wh = (
+            self.target_soc - self.session_start_soc
+        ) * self.wh_per_percent
+        await self._async_persist()
+        await self._async_check_target()
+
     # ---- event handling ------------------------------------------------
 
     async def _handle_change(self, event: Event[EventStateChangedData]) -> None:
         if not self.enabled:
+            # No control while disabled, but the views still refresh: Charge
+            # power mirrors a live entity and would otherwise sit frozen at
+            # whatever it happened to read when control was turned off.
+            self._notify()
             return
 
         entity_id = event.data["entity_id"]
@@ -329,7 +414,7 @@ class ChargeLimiterCoordinator:
             if self.state not in (ChargeState.COMPLETE, ChargeState.STALLED):
                 await self._async_stop()
         elif new_state.state == "on" and self.state in _PLUG_OFF_STATES:
-            await self._async_arm(switch_on=False)
+            await self._async_arm()
 
     async def _async_handle_soc(self, soc: float | None) -> None:
         """A fresh state-of-charge reading arrived."""
@@ -377,14 +462,18 @@ class ChargeLimiterCoordinator:
 
     # ---- transitions ---------------------------------------------------
 
-    async def _async_arm(self, switch_on: bool = True) -> None:
+    async def _async_arm(self) -> None:
+        """Watch for the next charge. Deliberately does not energise the plug.
+
+        Arming is readiness, not an instruction to start charging. Only the
+        owner closes the relay - through the Plug switch, the button on the
+        plug, or the vendor app - and all three arrive here the same way.
+        """
         self._cancel_timers()
         self.required_wh = None
         self.session_start_soc = None
         self._session_started_at = None
         self._set_state(ChargeState.ARMED)
-        if switch_on:
-            await self._async_switch_plug(True)
         await self._async_persist()
 
     async def _async_open_session(self) -> None:
@@ -482,6 +571,15 @@ class ChargeLimiterCoordinator:
             self._cancel_cap()
             self._cancel_cap = None
 
+    def _restart_cap_timer(self) -> None:
+        """Re-arm the cap so a changed maximum length applies to this session."""
+        if self.state not in (ChargeState.CHARGING, ChargeState.UNCALIBRATED):
+            return
+        if self._cancel_cap is not None:
+            self._cancel_cap()
+            self._cancel_cap = None
+        self._start_cap_timer()
+
     def _start_cap_timer(self) -> None:
         if self._cancel_cap is not None:
             return
@@ -527,7 +625,7 @@ class ChargeLimiterCoordinator:
         elif self.state is ChargeState.CHARGING:
             # Interrupted before target, so no calibration. Just re-arm.
             self._pending_calibration = None
-            await self._async_arm(switch_on=False)
+            await self._async_arm()
         self._notify()
 
     # ---- helpers -------------------------------------------------------

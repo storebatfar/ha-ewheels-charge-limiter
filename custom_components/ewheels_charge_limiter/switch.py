@@ -9,11 +9,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import ChargeState
 from .coordinator import ChargeLimiterCoordinator
 from .entity import ChargeLimiterEntity
-
-_PLUG_OFF_STATES = (ChargeState.COMPLETE, ChargeState.STOPPED, ChargeState.STALLED)
 
 
 async def async_setup_entry(
@@ -48,15 +45,16 @@ class PlugSwitch(ChargeLimiterEntity, SwitchEntity):
 
     Turning this on starts a session regardless of the current charge, which
     deliberately bypasses the target. "Turn the plug on" should mean exactly
-    that, otherwise the control feels broken.
+    that, otherwise the control feels broken. Nothing else energises the plug:
+    the limiter only ever cuts.
     """
 
     def __init__(self, coordinator: ChargeLimiterCoordinator) -> None:
         super().__init__(coordinator, "plug")
 
     @property
-    def is_on(self) -> bool:
-        return self.coordinator.state not in _PLUG_OFF_STATES
+    def is_on(self) -> bool | None:
+        return self.coordinator.plug_is_on
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         await self.coordinator.async_set_plug(True)
