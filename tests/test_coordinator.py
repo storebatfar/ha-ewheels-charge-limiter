@@ -25,6 +25,7 @@ from custom_components.ewheels_charge_limiter.const import (
     OPT_CHARGING_POWER_THRESHOLD,
     OPT_MAX_SESSION_HOURS,
     OPT_REARM_HYSTERESIS,
+    OPT_REST_MINUTES,
     OPT_TARGET_SOC,
     ChargeState,
 )
@@ -573,3 +574,146 @@ async def test_a_format_1_store_is_migrated(hass: HomeAssistant, hass_storage):
     assert coordinator.bands == pytest.approx([5.758] * 10)
     assert coordinator.remembered_charges == 0
     assert coordinator._pending_calibration["cut_at"] == 0.0
+
+
+async def _complete_a_session(hass: HomeAssistant, coordinator) -> None:
+    """40% -> target 80% at the flat seed; 400 Wh delivered, plug cut."""
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    hass.states.async_set(ENERGY, "0.4", {"unit_of_measurement": "kWh"})
+    await hass.async_block_till_done()
+    assert coordinator.state is ChargeState.COMPLETE
+
+
+async def _report_soc(hass: HomeAssistant, value: str) -> None:
+    hass.states.async_set(SOC, value, {"unit_of_measurement": "%"})
+    await hass.async_block_till_done()
+
+
+async def test_a_stale_resend_does_not_consume_the_note(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+):
+    """Bug 1: the ESPHome node replays its last value after a reconnect."""
+    coordinator = await _coordinator(hass)
+    await _complete_a_session(hass, coordinator)
+    freezer.tick(timedelta(minutes=31))
+
+    await _report_soc(hass, STATE_UNAVAILABLE)
+    await _report_soc(hass, "40")  # old news
+    assert coordinator._pending_calibration is not None
+    assert coordinator.remembered_charges == 0
+
+    await _report_soc(hass, "85")
+    assert coordinator.remembered_charges == 1
+    assert coordinator._pending_calibration is None
+
+
+async def test_an_early_reading_clears_the_projection_but_keeps_the_note(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+):
+    """Bugs 2 and 3: a real reading beats the guess, but foam teaches nothing."""
+    coordinator = await _coordinator(hass)
+    await _complete_a_session(hass, coordinator)
+    assert coordinator.projected_soc is not None
+
+    freezer.tick(timedelta(minutes=5))
+    await _report_soc(hass, "85")
+    assert coordinator.projected_soc is None
+    assert coordinator._pending_calibration is not None
+    assert coordinator.remembered_charges == 0
+
+    freezer.tick(timedelta(minutes=30))
+    await _report_soc(hass, "84")
+    assert coordinator.remembered_charges == 1
+    assert coordinator._charges[-1]["end_soc"] == 84.0
+
+
+async def test_the_rest_time_is_an_option(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+):
+    coordinator = await _coordinator(hass, **{OPT_REST_MINUTES: 5})
+    await _complete_a_session(hass, coordinator)
+    freezer.tick(timedelta(minutes=6))
+    await _report_soc(hass, "85")
+    assert coordinator.remembered_charges == 1
+
+
+async def test_a_too_small_rise_keeps_the_note(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+):
+    """Bug 1b: a silly answer is thrown away, the note is not."""
+    coordinator = await _coordinator(hass)
+    await _complete_a_session(hass, coordinator)
+    freezer.tick(timedelta(minutes=31))
+
+    await _report_soc(hass, "45")  # only 5 points above the start
+    assert coordinator._pending_calibration is not None
+    assert coordinator.remembered_charges == 0
+
+    await _report_soc(hass, "85")
+    assert coordinator.remembered_charges == 1
+
+
+async def test_a_new_session_clears_an_old_note(hass: HomeAssistant):
+    """Bug 4: a note only ever belongs to its own charge."""
+    coordinator = await _coordinator(hass)
+    await _complete_a_session(hass, coordinator)
+    assert coordinator._pending_calibration is not None
+
+    await coordinator.async_set_plug(True)
+    await hass.async_block_till_done()
+    hass.states.async_set(POWER, "0", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+
+    assert coordinator._pending_calibration is None
+
+
+async def test_a_next_morning_precharge_poll_does_not_teach(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+):
+    """Ridden overnight without a post-charge poll: below the start is no signal."""
+    coordinator = await _coordinator(hass)
+    await _complete_a_session(hass, coordinator)
+    freezer.tick(timedelta(hours=12))
+
+    await _report_soc(hass, "30")
+    assert coordinator.remembered_charges == 0
+    assert coordinator._pending_calibration is not None
+    assert coordinator.state is ChargeState.ARMED
+
+    hass.states.async_set(POWER, "0", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    assert coordinator._pending_calibration is None
+    assert coordinator.remembered_charges == 0
+
+
+async def test_a_reading_mid_charge_keeps_the_projection(hass: HomeAssistant):
+    coordinator = await _coordinator(hass)
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    await _report_soc(hass, "41")
+    assert coordinator.session_start_soc == 40.0
+    assert coordinator.projected_soc is not None
+
+
+async def test_a_restart_inside_the_rest_window_still_learns(
+    hass: HomeAssistant, hass_storage, freezer: FrozenDateTimeFactory
+):
+    coordinator = await _coordinator(hass)
+    await _complete_a_session(hass, coordinator)
+    await coordinator.async_shutdown()
+
+    revived = ChargeLimiterCoordinator(hass, coordinator.entry)
+    await revived.async_setup()
+    freezer.tick(timedelta(minutes=31))
+
+    await _report_soc(hass, STATE_UNAVAILABLE)
+    await _report_soc(hass, "40")  # the replay on startup
+    assert revived._pending_calibration is not None
+
+    await _report_soc(hass, "85")
+    assert revived.remembered_charges == 1

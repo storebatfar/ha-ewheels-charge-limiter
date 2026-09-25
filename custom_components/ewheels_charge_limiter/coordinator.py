@@ -36,6 +36,7 @@ from .const import (
     DEFAULT_IDLE_CLOSE_MINUTES,
     DEFAULT_MAX_SESSION_HOURS,
     DEFAULT_REARM_HYSTERESIS,
+    DEFAULT_REST_MINUTES,
     DEFAULT_SOC_STALENESS_HOURS,
     DEFAULT_TARGET_SOC,
     DOMAIN,
@@ -44,6 +45,7 @@ from .const import (
     OPT_IDLE_CLOSE_MINUTES,
     OPT_MAX_SESSION_HOURS,
     OPT_REARM_HYSTERESIS,
+    OPT_REST_MINUTES,
     OPT_SOC_STALENESS_HOURS,
     OPT_TARGET_SOC,
     STORAGE_VERSION,
@@ -200,6 +202,13 @@ class ChargeLimiterCoordinator:
                 )
             )
             * 3600.0
+        )
+
+    @property
+    def _rest_seconds(self) -> float:
+        return (
+            float(self.entry.options.get(OPT_REST_MINUTES, DEFAULT_REST_MINUTES))
+            * 60.0
         )
 
     @property
@@ -469,7 +478,7 @@ class ChargeLimiterCoordinator:
         if entity_id == self._plug_switch:
             await self._async_handle_plug(new_state)
         elif entity_id == self._soc_entity:
-            await self._async_handle_soc(_as_float(new_state))
+            await self._async_handle_soc(event)
         elif entity_id == self._power_entity:
             await self._async_handle_power(_as_float(new_state), event)
         elif entity_id == self._energy_entity:
@@ -492,19 +501,51 @@ class ChargeLimiterCoordinator:
         elif new_state.state == "on" and self.state in _PLUG_OFF_STATES:
             await self._async_arm()
 
-    async def _async_handle_soc(self, soc: float | None) -> None:
-        """A fresh state-of-charge reading arrived."""
+    async def _async_handle_soc(self, event: Event[EventStateChangedData]) -> None:
+        """A state-of-charge reading arrived."""
+        soc = _as_float(event.data["new_state"])
         if soc is None:
             return
 
-        self._apply_pending_calibration(soc)
-        await self._async_persist()
+        old_state = event.data["old_state"]
+        if old_state is not None and old_state.state not in _INVALID:
+            # Only a change between two numbers is news. A jump from
+            # unavailable is the node replaying what it last knew after a
+            # reconnect or an HA restart - usually the pre-charge value.
+            await self._async_take_real_reading(soc)
 
         if (
             self.state in _PLUG_OFF_STATES
             and soc < self.target_soc - self._rearm_hysteresis
         ):
             await self._async_arm()
+
+    async def _async_take_real_reading(self, soc: float) -> None:
+        """A real reading beats the projection; a settled one can teach."""
+        changed = False
+        if self.session_start_soc is not None and self.state not in (
+            ChargeState.CHARGING,
+            ChargeState.UNCALIBRATED,
+        ):
+            self.session_start_soc = None
+            changed = True
+
+        pending = self._pending_calibration
+        if (
+            pending is not None
+            and dt_util.utcnow().timestamp() - pending.get("cut_at", 0.0)
+            >= self._rest_seconds
+            and self._remember_charge(
+                pending["start_soc"], soc, pending["delivered_wh"], source="auto"
+            )
+        ):
+            # Removed only once it has taught something. Too soon, or too
+            # small a rise, and it waits for better news instead.
+            self._pending_calibration = None
+            changed = True
+
+        if changed:
+            await self._async_persist()
 
     async def _async_handle_power(
         self, power: float | None, event: Event[EventStateChangedData]
@@ -555,6 +596,9 @@ class ChargeLimiterCoordinator:
 
     async def _async_open_session(self) -> None:
         """Power crossed the threshold: record where we are starting from."""
+        # A note belongs to its own charge. Left in place, a later reading
+        # could pair it with this one and teach something false.
+        self._pending_calibration = None
         soc_state = self.hass.states.get(self._soc_entity)
         soc = _as_float(soc_state)
         age = (
@@ -610,6 +654,7 @@ class ChargeLimiterCoordinator:
             self._pending_calibration = {
                 "start_soc": self.session_start_soc,
                 "delivered_wh": self._meter.delivered_wh,
+                "cut_at": dt_util.utcnow().timestamp(),
             }
         self._cancel_timers()
         self._set_state(ChargeState.COMPLETE)
@@ -625,15 +670,6 @@ class ChargeLimiterCoordinator:
         self._session_started_at = None
         self._set_state(ChargeState.STOPPED)
         await self._async_persist()
-
-    def _apply_pending_calibration(self, soc: float) -> None:
-        if self._pending_calibration is None:
-            return
-        pending = self._pending_calibration
-        self._pending_calibration = None
-        self._remember_charge(
-            pending["start_soc"], soc, pending["delivered_wh"], source="auto"
-        )
 
     # ---- timers --------------------------------------------------------
 
