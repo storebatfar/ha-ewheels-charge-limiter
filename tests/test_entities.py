@@ -32,7 +32,7 @@ ENERGY = "sensor.plug_energy"
 SOC = "sensor.scooter_battery"
 
 
-async def _setup(hass: HomeAssistant, power: bool = True) -> MockConfigEntry:
+async def _setup(hass: HomeAssistant, power: bool = True, **options) -> MockConfigEntry:
     """Bring up a real switch entity for the plug, then the integration."""
     setup_test_component_platform(hass, SWITCH_DOMAIN, [MockToggleEntity("Plug", "on")])
     assert await async_setup_component(
@@ -59,6 +59,7 @@ async def _setup(hass: HomeAssistant, power: bool = True) -> MockConfigEntry:
             OPT_TARGET_SOC: 80.0,
             OPT_REARM_HYSTERESIS: 5.0,
             OPT_CHARGING_POWER_THRESHOLD: 5.0,
+            **options,
         },
     )
     entry.add_to_hass(hass)
@@ -255,3 +256,38 @@ async def test_a_version_1_entry_is_migrated(hass: HomeAssistant):
     assert OPT_WH_PER_PERCENT not in entry.options
     assert entry.options[OPT_REST_MINUTES] == 30
     assert entry.options[OPT_TARGET_SOC] == 90.0
+
+
+SHAPED = {"band_4": 5.0, "band_5": 5.0, "band_6": 10.0, "band_7": 10.0}
+
+
+async def test_wh_per_percent_is_the_average_cost_of_the_next_charge(
+    hass: HomeAssistant,
+):
+    await _setup(hass, **SHAPED)
+    # SoC 40 -> target 80: (50 + 50 + 100 + 100) / 40 points
+    assert float(hass.states.get("sensor.scooter_wh_per_percent").state) == (
+        pytest.approx(7.5)
+    )
+
+
+async def test_wh_per_percent_at_or_above_target_shows_the_target_band(
+    hass: HomeAssistant,
+):
+    await _setup(hass, **SHAPED)
+    hass.states.async_set(SOC, "85", {"unit_of_measurement": "%"})
+    await hass.async_block_till_done()
+    # target 80 lies in band 8, which is untyped: the seed
+    assert float(hass.states.get("sensor.scooter_wh_per_percent").state) == (
+        pytest.approx(720 / 100 / 0.87, abs=0.001)
+    )
+
+
+async def test_wh_per_percent_exposes_the_vase(hass: HomeAssistant):
+    await _setup(hass, **SHAPED)
+    attributes = hass.states.get("sensor.scooter_wh_per_percent").attributes
+    assert attributes["bands"][4] == 5.0
+    assert attributes["bands"][6] == 10.0
+    assert attributes["typed_bands"] == [4, 5, 6, 7]
+    assert attributes["remembered_charges"] == 0
+    assert attributes["default_prior"] == pytest.approx(8.276, abs=0.001)

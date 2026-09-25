@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -26,6 +27,7 @@ class ChargeLimiterSensorDescription(SensorEntityDescription):
     """Describes one sensor."""
 
     value_fn: Callable[[ChargeLimiterCoordinator], float | str | None]
+    attrs_fn: Callable[[ChargeLimiterCoordinator], dict[str, Any]] | None = None
 
 
 SENSORS: tuple[ChargeLimiterSensorDescription, ...] = (
@@ -59,6 +61,12 @@ SENSORS: tuple[ChargeLimiterSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda c: round(c.next_charge_wh_per_percent, 3),
+        attrs_fn=lambda c: {
+            "bands": [round(b, 3) for b in c.bands],
+            "typed_bands": c.typed_bands,
+            "remembered_charges": c.remembered_charges,
+            "default_prior": round(c.default_prior, 3),
+        },
     ),
 )
 
@@ -104,3 +112,9 @@ class ChargeLimiterSensor(ChargeLimiterEntity, SensorEntity):
     @property
     def native_value(self) -> float | str | None:
         return self.entity_description.value_fn(self.coordinator)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        if self.entity_description.attrs_fn is None:
+            return None
+        return self.entity_description.attrs_fn(self.coordinator)
