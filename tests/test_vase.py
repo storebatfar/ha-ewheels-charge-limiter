@@ -94,3 +94,13 @@ def test_the_fit_clamps_to_floor_and_ceiling():
         [CEILING] * 10
     )
     assert fit_bands([], [0.1] * 10, FLOOR, CEILING) == pytest.approx([FLOOR] * 10)
+
+
+
+def test_a_prior_beyond_the_clamp_fits_as_the_clamp():
+    """A typo like 94 for 9.4 must not bend its neighbours before clamping."""
+    wild = [5.758] * 9 + [50.0]
+    clamped = [5.758] * 9 + [CEILING]
+    assert fit_bands(REAL, wild, FLOOR, CEILING) == pytest.approx(
+        fit_bands(REAL, clamped, FLOOR, CEILING)
+    )

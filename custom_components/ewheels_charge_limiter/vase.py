@@ -90,6 +90,9 @@ def fit_bands(
     deliberate: a typed prior then survives exactly where there is no data,
     instead of being blended into its neighbours.
     """
+    # A prior beyond the clamp would otherwise bend its neighbours in the
+    # solve before being clamped itself afterwards.
+    priors = [min(max(prior, floor), ceiling) for prior in priors]
     size = BAND_COUNT
     matrix = [[0.0] * size for _ in range(size)]
     rhs = [0.0] * size

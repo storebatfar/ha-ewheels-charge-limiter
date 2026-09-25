@@ -17,8 +17,18 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfEnergy
-from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
-from homeassistant.helpers.event import async_call_later, async_track_state_change_event
+from homeassistant.core import (
+    Event,
+    EventStateChangedData,
+    EventStateReportedData,
+    HomeAssistant,
+    callback,
+)
+from homeassistant.helpers.event import (
+    async_call_later,
+    async_track_state_change_event,
+    async_track_state_report_event,
+)
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
@@ -48,6 +58,7 @@ from .const import (
     OPT_REST_MINUTES,
     OPT_SOC_STALENESS_HOURS,
     OPT_TARGET_SOC,
+    PLAUSIBLE_SHORTFALL_PCT,
     STORAGE_VERSION,
     ChargeState,
 )
@@ -297,6 +308,13 @@ class ChargeLimiterCoordinator:
         self._unsubscribes.append(
             async_track_state_change_event(self.hass, watched, self._handle_change)
         )
+        # An unchanged value re-read later raises no state change, only a
+        # report - and a settled re-poll of the same value is still news.
+        self._unsubscribes.append(
+            async_track_state_report_event(
+                self.hass, [self._soc_entity], self._handle_report
+            )
+        )
         self._unsubscribes.append(
             self.entry.add_update_listener(self._async_options_updated)
         )
@@ -512,13 +530,24 @@ class ChargeLimiterCoordinator:
             # Only a change between two numbers is news. A jump from
             # unavailable is the node replaying what it last knew after a
             # reconnect or an HA restart - usually the pre-charge value.
+            # Old news re-arms nothing either: arming would drop the
+            # projection, and a restart or a manual plug-on arms anyway.
             await self._async_take_real_reading(soc)
+            if (
+                self.state in _PLUG_OFF_STATES
+                and soc < self.target_soc - self._rearm_hysteresis
+            ):
+                await self._async_arm()
 
-        if (
-            self.state in _PLUG_OFF_STATES
-            and soc < self.target_soc - self._rearm_hysteresis
-        ):
-            await self._async_arm()
+    async def _handle_report(self, event: Event[EventStateReportedData]) -> None:
+        """The same reading was reported again: the pack was read just now."""
+        if not self.enabled:
+            return
+        soc = _as_float(event.data["new_state"])
+        if soc is None:
+            return
+        await self._async_take_real_reading(soc)
+        self._notify()
 
     async def _async_take_real_reading(self, soc: float) -> None:
         """A real reading beats the projection; a settled one can teach."""
@@ -531,18 +560,26 @@ class ChargeLimiterCoordinator:
             changed = True
 
         pending = self._pending_calibration
-        if (
-            pending is not None
-            and dt_util.utcnow().timestamp() - pending.get("cut_at", 0.0)
-            >= self._rest_seconds
-            and self._remember_charge(
+        if pending is not None:
+            age = dt_util.utcnow().timestamp() - pending.get("cut_at", 0.0)
+            projected = pending.get("projected_end")
+            if age > self._staleness_seconds or (
+                age >= self._rest_seconds
+                and projected is not None
+                and soc < projected - PLAUSIBLE_SHORTFALL_PCT
+            ):
+                # Long after the cut, or far below where the charge should
+                # have ended: the device has been used since, so no reading
+                # from now on can measure that charge. Drop the note.
+                self._pending_calibration = None
+                changed = True
+            elif age >= self._rest_seconds and self._remember_charge(
                 pending["start_soc"], soc, pending["delivered_wh"], source="auto"
-            )
-        ):
-            # Removed only once it has taught something. Too soon, or too
-            # small a rise, and it waits for better news instead.
-            self._pending_calibration = None
-            changed = True
+            ):
+                # Removed only once it has taught something. Too soon, or too
+                # small a rise, and it waits for better news instead.
+                self._pending_calibration = None
+                changed = True
 
         if changed:
             await self._async_persist()
@@ -655,6 +692,9 @@ class ChargeLimiterCoordinator:
                 "start_soc": self.session_start_soc,
                 "delivered_wh": self._meter.delivered_wh,
                 "cut_at": dt_util.utcnow().timestamp(),
+                "projected_end": soc_after(
+                    self.bands, self.session_start_soc, self._meter.delivered_wh
+                ),
             }
         self._cancel_timers()
         self._set_state(ChargeState.COMPLETE)

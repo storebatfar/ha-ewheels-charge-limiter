@@ -641,17 +641,19 @@ async def test_the_rest_time_is_an_option(
 async def test_a_too_small_rise_keeps_the_note(
     hass: HomeAssistant, freezer: FrozenDateTimeFactory
 ):
-    """Bug 1b: a silly answer is thrown away, the note is not."""
+    """Bug 1b: a small charge carries too little signal; the note waits."""
     coordinator = await _coordinator(hass)
-    await _complete_a_session(hass, coordinator)
+    await _report_soc(hass, "72")
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    hass.states.async_set(ENERGY, "0.07", {"unit_of_measurement": "kWh"})
+    await hass.async_block_till_done()
+    assert coordinator.state is ChargeState.COMPLETE
     freezer.tick(timedelta(minutes=31))
 
-    await _report_soc(hass, "45")  # only 5 points above the start
+    await _report_soc(hass, "79")  # settled, plausible, but only 7 points
     assert coordinator._pending_calibration is not None
     assert coordinator.remembered_charges == 0
-
-    await _report_soc(hass, "85")
-    assert coordinator.remembered_charges == 1
 
 
 async def test_a_new_session_clears_an_old_note(hass: HomeAssistant):
@@ -680,15 +682,8 @@ async def test_a_next_morning_precharge_poll_does_not_teach(
 
     await _report_soc(hass, "30")
     assert coordinator.remembered_charges == 0
-    assert coordinator._pending_calibration is not None
-    assert coordinator.state is ChargeState.ARMED
-
-    hass.states.async_set(POWER, "0", {"unit_of_measurement": "W"})
-    await hass.async_block_till_done()
-    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
-    await hass.async_block_till_done()
     assert coordinator._pending_calibration is None
-    assert coordinator.remembered_charges == 0
+    assert coordinator.state is ChargeState.ARMED
 
 
 async def test_a_reading_mid_charge_keeps_the_projection(hass: HomeAssistant):
@@ -717,3 +712,54 @@ async def test_a_restart_inside_the_rest_window_still_learns(
 
     await _report_soc(hass, "85")
     assert revived.remembered_charges == 1
+
+
+async def test_a_post_ride_poll_above_the_start_does_not_teach(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+):
+    """Charged 40->80, ridden to 55, polled: 15 points up is not this charge."""
+    coordinator = await _coordinator(hass)
+    await _complete_a_session(hass, coordinator)
+    freezer.tick(timedelta(hours=2))
+
+    await _report_soc(hass, "55")
+    assert coordinator.remembered_charges == 0
+    assert coordinator._pending_calibration is None
+    assert coordinator.bands == pytest.approx([720 / 100 / 0.87] * 10)
+
+
+async def test_a_note_expires_after_the_staleness_window(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+):
+    coordinator = await _coordinator(hass, soc_staleness_hours=12)
+    await _complete_a_session(hass, coordinator)
+    freezer.tick(timedelta(hours=13))
+
+    await _report_soc(hass, "85")
+    assert coordinator.remembered_charges == 0
+    assert coordinator._pending_calibration is None
+
+
+async def test_a_same_value_repoll_after_the_rest_window_teaches(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+):
+    """HA fires no state change for an unchanged value, only a report."""
+    coordinator = await _coordinator(hass)
+    await _complete_a_session(hass, coordinator)
+    freezer.tick(timedelta(minutes=5))
+    await _report_soc(hass, "85")  # early
+    assert coordinator.remembered_charges == 0
+
+    freezer.tick(timedelta(minutes=30))
+    await _report_soc(hass, "85")  # same value, now settled
+    assert coordinator.remembered_charges == 1
+
+
+async def test_a_stale_replay_keeps_the_projection(hass: HomeAssistant):
+    coordinator = await _coordinator(hass)
+    await _complete_a_session(hass, coordinator)
+
+    await _report_soc(hass, STATE_UNAVAILABLE)
+    await _report_soc(hass, "40")  # replay of the pre-charge value
+    assert coordinator.projected_soc is not None
+    assert coordinator.state is ChargeState.COMPLETE

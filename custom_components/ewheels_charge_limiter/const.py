@@ -51,6 +51,9 @@ FIT_PRIOR_WEIGHT = 1.0
 FIT_SMOOTHING_WEIGHT = 5.0
 BAND_OPTION_KEYS = tuple(f"band_{i}" for i in range(10))
 MAX_REMEMBERED_CHARGES = 10
+# A settled reading this far below where the charge should have ended means
+# the device has been used since, so it no longer measures that charge.
+PLAUSIBLE_SHORTFALL_PCT = 15.0
 
 STORAGE_VERSION = 2
 
