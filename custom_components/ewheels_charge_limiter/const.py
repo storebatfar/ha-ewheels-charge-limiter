@@ -20,6 +20,7 @@ CONF_ALLOW_FOREIGN_METER = "allow_foreign_meter"
 # Option keys
 OPT_TARGET_SOC = "target_soc"
 OPT_REARM_HYSTERESIS = "rearm_hysteresis"
+# Retired in 2026.10 (superseded by the vase); read only by entry migration.
 OPT_WH_PER_PERCENT = "wh_per_percent"
 OPT_CHARGING_POWER_THRESHOLD = "charging_power_threshold"
 OPT_IDLE_CLOSE_MINUTES = "idle_close_minutes"
@@ -36,18 +37,17 @@ DEFAULT_SOC_STALENESS_HOURS = 12
 DEFAULT_CHARGER_EFFICIENCY = 0.87
 
 # Calibration tuning
-CALIBRATION_EMA_WEIGHT = 0.3
 CALIBRATION_MIN_DELTA_PCT = 10.0
-CALIBRATION_CLAMP_LOW = 0.5
-CALIBRATION_CLAMP_HIGH = 2.0
 
 # The vase: per-band energy model
 BAND_CLAMP_LOW = 0.25
 BAND_CLAMP_HIGH = 3.0
 FIT_PRIOR_WEIGHT = 1.0
 FIT_SMOOTHING_WEIGHT = 5.0
+BAND_OPTION_KEYS = tuple(f"band_{i}" for i in range(10))
+MAX_REMEMBERED_CHARGES = 10
 
-STORAGE_VERSION = 1
+STORAGE_VERSION = 2
 
 
 class ChargeState(StrEnum):

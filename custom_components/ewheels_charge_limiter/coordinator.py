@@ -22,8 +22,11 @@ from homeassistant.helpers.event import async_call_later, async_track_state_chan
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .calibration import seed_wh_per_percent, update_wh_per_percent
 from .const import (
+    BAND_CLAMP_HIGH,
+    BAND_CLAMP_LOW,
+    BAND_OPTION_KEYS,
+    CALIBRATION_MIN_DELTA_PCT,
     CONF_CAPACITY_WH,
     CONF_ENERGY_ENTITY,
     CONF_PLUG_SWITCH,
@@ -36,17 +39,25 @@ from .const import (
     DEFAULT_SOC_STALENESS_HOURS,
     DEFAULT_TARGET_SOC,
     DOMAIN,
+    MAX_REMEMBERED_CHARGES,
     OPT_CHARGING_POWER_THRESHOLD,
     OPT_IDLE_CLOSE_MINUTES,
     OPT_MAX_SESSION_HOURS,
     OPT_REARM_HYSTERESIS,
     OPT_SOC_STALENESS_HOURS,
     OPT_TARGET_SOC,
-    OPT_WH_PER_PERCENT,
     STORAGE_VERSION,
     ChargeState,
 )
 from .energy_meter import EnergyMeter
+from .vase import (
+    BAND_COUNT,
+    band_at,
+    energy_between,
+    fit_bands,
+    seed_wh_per_percent,
+    soc_after,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -74,6 +85,35 @@ def _to_wh(state: Any, value: float) -> float:
     return value
 
 
+
+def migrate_stored_data(old_major_version: int, data: dict[str, Any]) -> dict[str, Any]:
+    """Upgrade stored data from an older format.
+
+    Format 1 carried one learned Wh-per-percent. It becomes the default prior
+    for every band nobody has typed a value for, so nothing learned is lost.
+    A pending calibration from before the upgrade gets cut_at 0: treated as
+    long settled, so the first real reading after the upgrade can still use it.
+    """
+    if old_major_version == 1:
+        data = dict(data)
+        data["default_prior"] = data.pop("wh_per_percent", None)
+        data.setdefault("charges", [])
+        if (pending := data.get("pending_calibration")) is not None:
+            data["pending_calibration"] = {"cut_at": 0.0, **pending}
+    return data
+
+
+class _LimiterStore(Store[dict[str, Any]]):
+    """Store that knows how to upgrade its own older formats."""
+
+    async def _async_migrate_func(
+        self,
+        old_major_version: int,
+        old_minor_version: int,
+        old_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        return migrate_stored_data(old_major_version, old_data)
+
 class ChargeLimiterCoordinator:
     """Owns the state machine for one configured plug."""
 
@@ -93,20 +133,15 @@ class ChargeLimiterCoordinator:
         self.session_start_soc: float | None = None
 
         self._seed = seed_wh_per_percent(self._capacity_wh)
-        self.wh_per_percent: float = float(
-            entry.options.get(OPT_WH_PER_PERCENT) or self._seed
-        )
-        # The override as last seen in the options, so a later edit can be told
-        # apart from the same value simply being present again.
-        self._options_wh_per_percent: float | None = entry.options.get(
-            OPT_WH_PER_PERCENT
-        )
+        self._default_prior: float = self._seed
+        self._charges: list[dict[str, Any]] = []
+        self.bands: list[float] = [self._seed] * BAND_COUNT
 
         self._meter = EnergyMeter()
         self._pending_calibration: dict[str, float] | None = None
         self._session_started_at: float | None = None
 
-        self._store: Store[dict[str, Any]] = Store(
+        self._store: Store[dict[str, Any]] = _LimiterStore(
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}"
         )
         self._cancel_idle: Callable[[], None] | None = None
@@ -175,7 +210,42 @@ class ChargeLimiterCoordinator:
     def projected_soc(self) -> float | None:
         if self.session_start_soc is None:
             return None
-        return self.session_start_soc + self._meter.delivered_wh / self.wh_per_percent
+        return soc_after(self.bands, self.session_start_soc, self._meter.delivered_wh)
+
+    @property
+    def priors(self) -> list[float]:
+        """Each band's starting point: its typed value, else the default."""
+        return [
+            float(value)
+            if (value := self.entry.options.get(key)) is not None
+            else self._default_prior
+            for key in BAND_OPTION_KEYS
+        ]
+
+    @property
+    def typed_bands(self) -> list[int]:
+        return [
+            i
+            for i, key in enumerate(BAND_OPTION_KEYS)
+            if self.entry.options.get(key) is not None
+        ]
+
+    @property
+    def remembered_charges(self) -> int:
+        return len(self._charges)
+
+    @property
+    def default_prior(self) -> float:
+        return self._default_prior
+
+    @property
+    def next_charge_wh_per_percent(self) -> float:
+        """Average cost per point of charging from the latest reading to target."""
+        target = self.target_soc
+        soc = _as_float(self.hass.states.get(self._soc_entity))
+        if soc is None or soc >= target:
+            return band_at(self.bands, target)
+        return energy_between(self.bands, soc, target) / (target - soc)
 
     @property
     def power_entity_id(self) -> str | None:
@@ -207,6 +277,7 @@ class ChargeLimiterCoordinator:
         """Restore any in-flight session, subscribe, and settle into a state."""
         if stored := await self._store.async_load():
             self._restore(stored)
+        self._refit()
 
         watched = [self._plug_switch, self._soc_entity]
         if self._power_entity:
@@ -243,7 +314,8 @@ class ChargeLimiterCoordinator:
     def _restore(self, stored: dict[str, Any]) -> None:
         self.state = ChargeState(stored.get("state", ChargeState.IDLE))
         self.enabled = stored.get("enabled", True)
-        self.wh_per_percent = stored.get("wh_per_percent", self._seed)
+        self._default_prior = float(stored.get("default_prior") or self._seed)
+        self._charges = list(stored.get("charges", []))
         self.required_wh = stored.get("required_wh")
         self.session_start_soc = stored.get("session_start_soc")
         self._session_started_at = stored.get("session_started_at")
@@ -256,7 +328,9 @@ class ChargeLimiterCoordinator:
         return {
             "state": str(self.state),
             "enabled": self.enabled,
-            "wh_per_percent": self.wh_per_percent,
+            "default_prior": self._default_prior,
+            "charges": self._charges,
+            "bands": self.bands,
             "required_wh": self.required_wh,
             "session_start_soc": self.session_start_soc,
             "session_started_at": self._session_started_at,
@@ -314,6 +388,23 @@ class ChargeLimiterCoordinator:
         """
         await self._async_switch_plug(on)
 
+    async def async_record_charge(
+        self, start_soc: float, end_soc: float, energy_wh: float
+    ) -> None:
+        """Remember a charge measured some other way, then refit."""
+        if not self._remember_charge(start_soc, end_soc, energy_wh, source="manual"):
+            raise ValueError(
+                "A charge must span at least "
+                f"{CALIBRATION_MIN_DELTA_PCT:g} points and deliver energy"
+            )
+        await self._async_after_refit()
+
+    async def async_forget_charges(self) -> None:
+        """Drop every remembered charge; the bands fall back to their priors."""
+        self._charges.clear()
+        self._refit()
+        await self._async_after_refit()
+
     async def _async_options_updated(
         self, _hass: HomeAssistant, _entry: ConfigEntry
     ) -> None:
@@ -324,25 +415,10 @@ class ChargeLimiterCoordinator:
         mid-charge and re-enters setup, which is a poor place to be holding a
         running session.
         """
-        self._apply_wh_per_percent_option()
+        self._refit()
         self._restart_cap_timer()
         await self._async_recompute_required_wh()
         self._notify()
-
-    @callback
-    def _apply_wh_per_percent_option(self) -> None:
-        """Adopt a manual override of the calibration, if one has just been set.
-
-        Only on an actual change: re-applying the value already sitting in the
-        options on every unrelated edit would claw back everything the sessions
-        since have learned.
-        """
-        override = self.entry.options.get(OPT_WH_PER_PERCENT)
-        if override == self._options_wh_per_percent:
-            return
-        self._options_wh_per_percent = override
-        if override:
-            self.wh_per_percent = float(override)
 
     async def _async_recompute_required_wh(self) -> None:
         """Re-measure an open session against the current target.
@@ -357,9 +433,9 @@ class ChargeLimiterCoordinator:
         if self.state is not ChargeState.CHARGING or self.session_start_soc is None:
             return
 
-        self.required_wh = (
-            self.target_soc - self.session_start_soc
-        ) * self.wh_per_percent
+        self.required_wh = energy_between(
+            self.bands, self.session_start_soc, self.target_soc
+        )
         await self._async_persist()
         await self._async_check_target()
 
@@ -422,6 +498,7 @@ class ChargeLimiterCoordinator:
             return
 
         self._apply_pending_calibration(soc)
+        await self._async_persist()
 
         if (
             self.state in _PLUG_OFF_STATES
@@ -509,7 +586,7 @@ class ChargeLimiterCoordinator:
             return
 
         self.session_start_soc = soc
-        self.required_wh = (self.target_soc - soc) * self.wh_per_percent
+        self.required_wh = energy_between(self.bands, soc, self.target_soc)
 
         energy_state = (
             self.hass.states.get(self._energy_entity) if self._energy_entity else None
@@ -552,14 +629,11 @@ class ChargeLimiterCoordinator:
     def _apply_pending_calibration(self, soc: float) -> None:
         if self._pending_calibration is None:
             return
-        self.wh_per_percent = update_wh_per_percent(
-            current=self.wh_per_percent,
-            seed=self._seed,
-            delivered_wh=self._pending_calibration["delivered_wh"],
-            start_soc=self._pending_calibration["start_soc"],
-            end_soc=soc,
-        )
+        pending = self._pending_calibration
         self._pending_calibration = None
+        self._remember_charge(
+            pending["start_soc"], soc, pending["delivered_wh"], source="auto"
+        )
 
     # ---- timers --------------------------------------------------------
 
@@ -629,6 +703,42 @@ class ChargeLimiterCoordinator:
         self._notify()
 
     # ---- helpers -------------------------------------------------------
+
+    @callback
+    def _remember_charge(
+        self, start_soc: float, end_soc: float, energy_wh: float, source: str
+    ) -> bool:
+        """Keep a charge for the fit. False if it carries too little signal."""
+        if end_soc - start_soc < CALIBRATION_MIN_DELTA_PCT or energy_wh <= 0:
+            return False
+        self._charges.append(
+            {
+                "start_soc": float(start_soc),
+                "end_soc": float(end_soc),
+                "energy_wh": float(energy_wh),
+                "recorded_at": dt_util.utcnow().timestamp(),
+                "source": source,
+            }
+        )
+        del self._charges[:-MAX_REMEMBERED_CHARGES]
+        self._refit()
+        return True
+
+    @callback
+    def _refit(self) -> None:
+        self.bands = fit_bands(
+            [(c["start_soc"], c["end_soc"], c["energy_wh"]) for c in self._charges],
+            self.priors,
+            floor=BAND_CLAMP_LOW * self._seed,
+            ceiling=BAND_CLAMP_HIGH * self._seed,
+        )
+
+    async def _async_after_refit(self) -> None:
+        """Persist, and re-measure an open session against the new bands."""
+        await self._async_persist()
+        await self._async_recompute_required_wh()
+        self._notify()
+
 
     def _has_live_meter(self) -> bool:
         """True while at least one meter is still readable."""

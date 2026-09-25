@@ -21,11 +21,11 @@ from custom_components.ewheels_charge_limiter.const import (
     CONF_POWER_ENTITY,
     CONF_SOC_ENTITY,
     DOMAIN,
+    MAX_REMEMBERED_CHARGES,
     OPT_CHARGING_POWER_THRESHOLD,
     OPT_MAX_SESSION_HOURS,
     OPT_REARM_HYSTERESIS,
     OPT_TARGET_SOC,
-    OPT_WH_PER_PERCENT,
     ChargeState,
 )
 from custom_components.ewheels_charge_limiter.coordinator import (
@@ -221,7 +221,6 @@ async def test_manual_off_stops_an_open_session(hass: HomeAssistant):
 
 async def test_manual_stop_records_no_calibration(hass: HomeAssistant):
     coordinator = await _coordinator(hass)
-    before = coordinator.wh_per_percent
     hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
     await hass.async_block_till_done()
     hass.states.async_set(ENERGY, "0.3", {"unit_of_measurement": "kWh"})
@@ -232,7 +231,7 @@ async def test_manual_stop_records_no_calibration(hass: HomeAssistant):
     hass.states.async_set(SOC, "75", {"unit_of_measurement": "%"})
     await hass.async_block_till_done()
 
-    assert coordinator.wh_per_percent == before
+    assert coordinator.remembered_charges == 0
 
 
 async def test_an_external_plug_change_drives_the_same_transition(
@@ -425,35 +424,6 @@ async def test_shortening_the_max_session_applies_to_the_open_session(
     assert coordinator.state is ChargeState.STALLED
 
 
-async def test_a_new_wh_per_percent_option_is_applied(hass: HomeAssistant):
-    coordinator = await _coordinator(hass)
-    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
-    await hass.async_block_till_done()
-
-    hass.config_entries.async_update_entry(
-        coordinator.entry,
-        options={**coordinator.entry.options, OPT_WH_PER_PERCENT: 10.0},
-    )
-    await hass.async_block_till_done()
-
-    assert coordinator.wh_per_percent == pytest.approx(10.0)
-    # The open session is re-measured against it: 40% -> 80% at 10 Wh/%.
-    assert coordinator.required_wh == pytest.approx(400.0)
-
-
-async def test_an_unchanged_wh_per_percent_option_does_not_undo_calibration(
-    hass: HomeAssistant,
-):
-    """A stale override must not claw back what later sessions learned."""
-    coordinator = await _coordinator(hass, wh_per_percent=10.0)
-    coordinator.wh_per_percent = 9.0
-
-    await coordinator.async_set_target(85.0)
-    await hass.async_block_till_done()
-
-    assert coordinator.wh_per_percent == pytest.approx(9.0)
-
-
 async def test_a_session_survives_a_reload(hass: HomeAssistant, hass_storage):
     coordinator = await _coordinator(hass)
     hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
@@ -471,3 +441,135 @@ async def test_a_session_survives_a_reload(hass: HomeAssistant, hass_storage):
     assert revived.state is ChargeState.CHARGING
     assert revived.session_delivered_wh == pytest.approx(200.0)
     assert revived.session_start_soc == pytest.approx(40.0)
+
+
+# 40-50 and 50-60 at 5 Wh/pt, 60-70 and 70-80 at 10 Wh/pt; everything else seed.
+SHAPED = {"band_4": 5.0, "band_5": 5.0, "band_6": 10.0, "band_7": 10.0}
+
+
+async def test_required_energy_follows_the_bands(hass: HomeAssistant):
+    coordinator = await _coordinator(hass, **SHAPED)
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    # 40 -> 80: 10*5 + 10*5 + 10*10 + 10*10
+    assert coordinator.required_wh == pytest.approx(300.0)
+
+
+async def test_projected_charge_walks_the_bands(hass: HomeAssistant):
+    coordinator = await _coordinator(hass, **SHAPED)
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    hass.states.async_set(ENERGY, "0.15", {"unit_of_measurement": "kWh"})
+    await hass.async_block_till_done()
+    # 100 Wh carries 40 -> 60 at 5 Wh/pt, the last 50 Wh buys 5 points at 10
+    assert coordinator.projected_soc == pytest.approx(65.0)
+
+
+async def test_typing_a_band_mid_session_recomputes_the_requirement(
+    hass: HomeAssistant,
+):
+    coordinator = await _coordinator(hass)
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+
+    hass.config_entries.async_update_entry(
+        coordinator.entry, options={**coordinator.entry.options, "band_7": 20.0}
+    )
+    await hass.async_block_till_done()
+
+    seed = 720 / 100 / 0.87
+    assert coordinator.required_wh == pytest.approx(30 * seed + 10 * 20.0)
+
+
+async def test_a_typed_band_above_the_ceiling_is_clamped(hass: HomeAssistant):
+    coordinator = await _coordinator(hass, band_0=500.0)
+    assert coordinator.bands[0] == pytest.approx(3.0 * 720 / 100 / 0.87)
+
+
+async def test_a_completed_charge_is_remembered(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+):
+    coordinator = await _coordinator(hass)
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    hass.states.async_set(ENERGY, "0.4", {"unit_of_measurement": "kWh"})
+    await hass.async_block_till_done()
+    assert coordinator.state is ChargeState.COMPLETE
+
+    freezer.tick(timedelta(minutes=31))
+    hass.states.async_set(SOC, "85", {"unit_of_measurement": "%"})
+    await hass.async_block_till_done()
+
+    assert coordinator.remembered_charges == 1
+    assert coordinator._charges[-1]["end_soc"] == 85.0
+    assert coordinator.bands != pytest.approx([720 / 100 / 0.87] * 10)
+
+
+async def test_remembered_charges_cap_at_ten_dropping_the_oldest(
+    hass: HomeAssistant,
+):
+    coordinator = await _coordinator(hass)
+    for start in range(11):
+        await coordinator.async_record_charge(float(start), start + 40.0, 300.0)
+    assert coordinator.remembered_charges == MAX_REMEMBERED_CHARGES
+    assert coordinator._charges[0]["start_soc"] == 1.0
+
+
+async def test_record_charge_rejects_a_short_span(hass: HomeAssistant):
+    coordinator = await _coordinator(hass)
+    with pytest.raises(ValueError):
+        await coordinator.async_record_charge(50.0, 55.0, 40.0)
+    assert coordinator.remembered_charges == 0
+
+
+async def test_forgetting_charges_returns_to_the_priors(hass: HomeAssistant):
+    coordinator = await _coordinator(hass)
+    await coordinator.async_record_charge(40.0, 80.0, 200.0)
+    await coordinator.async_forget_charges()
+    assert coordinator.remembered_charges == 0
+    assert coordinator.bands == pytest.approx([720 / 100 / 0.87] * 10)
+
+
+async def test_remembered_charges_survive_a_reload(hass: HomeAssistant, hass_storage):
+    coordinator = await _coordinator(hass)
+    await coordinator.async_record_charge(40.0, 80.0, 200.0)
+    bands = list(coordinator.bands)
+    await coordinator.async_shutdown()
+
+    revived = ChargeLimiterCoordinator(hass, coordinator.entry)
+    await revived.async_setup()
+    assert revived.remembered_charges == 1
+    assert revived.bands == pytest.approx(bands)
+
+
+async def test_a_format_1_store_is_migrated(hass: HomeAssistant, hass_storage):
+    _register_switch_services(hass)
+    hass.states.async_set(PLUG, "off")
+    hass.states.async_set(POWER, "0", {"unit_of_measurement": "W"})
+    hass.states.async_set(ENERGY, "0", {"unit_of_measurement": "kWh"})
+    hass.states.async_set(SOC, "97", {"unit_of_measurement": "%"})
+    entry = _entry(hass)
+    key = f"{DOMAIN}.{entry.entry_id}"
+    hass_storage[key] = {
+        "version": 1,
+        "minor_version": 1,
+        "key": key,
+        "data": {
+            "state": "complete",
+            "enabled": True,
+            "wh_per_percent": 5.758,
+            "required_wh": None,
+            "session_start_soc": None,
+            "session_started_at": None,
+            "pending_calibration": {"start_soc": 45.0, "delivered_wh": 270.1},
+            "meter": None,
+        },
+    }
+
+    coordinator = ChargeLimiterCoordinator(hass, entry)
+    await coordinator.async_setup()
+
+    assert coordinator.default_prior == pytest.approx(5.758)
+    assert coordinator.bands == pytest.approx([5.758] * 10)
+    assert coordinator.remembered_charges == 0
+    assert coordinator._pending_calibration["cut_at"] == 0.0

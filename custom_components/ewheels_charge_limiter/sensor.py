@@ -58,7 +58,7 @@ SENSORS: tuple[ChargeLimiterSensorDescription, ...] = (
         translation_key="wh_per_percent",
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda c: round(c.wh_per_percent, 3),
+        value_fn=lambda c: round(c.next_charge_wh_per_percent, 3),
     ),
 )
 
