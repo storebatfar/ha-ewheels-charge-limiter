@@ -27,6 +27,7 @@ from .const import (
     DEFAULT_IDLE_CLOSE_MINUTES,
     DEFAULT_MAX_SESSION_HOURS,
     DEFAULT_REARM_HYSTERESIS,
+    DEFAULT_REST_MINUTES,
     DEFAULT_SOC_STALENESS_HOURS,
     DEFAULT_TARGET_SOC,
     DOMAIN,
@@ -34,6 +35,7 @@ from .const import (
     OPT_IDLE_CLOSE_MINUTES,
     OPT_MAX_SESSION_HOURS,
     OPT_REARM_HYSTERESIS,
+    OPT_REST_MINUTES,
     OPT_SOC_STALENESS_HOURS,
     OPT_TARGET_SOC,
     OPT_WH_PER_PERCENT,
@@ -108,6 +110,7 @@ def _default_options() -> dict[str, Any]:
         OPT_IDLE_CLOSE_MINUTES: DEFAULT_IDLE_CLOSE_MINUTES,
         OPT_MAX_SESSION_HOURS: DEFAULT_MAX_SESSION_HOURS,
         OPT_SOC_STALENESS_HOURS: DEFAULT_SOC_STALENESS_HOURS,
+        OPT_REST_MINUTES: DEFAULT_REST_MINUTES,
     }
 
 
@@ -120,7 +123,7 @@ class EWheelsChargeLimiterConfigFlow(ConfigFlow, domain=DOMAIN):
     cut mains. Naming the entities outright is shorter and honest.
     """
 
-    VERSION = 1
+    VERSION = 2
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None

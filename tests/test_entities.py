@@ -21,7 +21,9 @@ from custom_components.ewheels_charge_limiter.const import (
     DOMAIN,
     OPT_CHARGING_POWER_THRESHOLD,
     OPT_REARM_HYSTERESIS,
+    OPT_REST_MINUTES,
     OPT_TARGET_SOC,
+    OPT_WH_PER_PERCENT,
 )
 
 PLUG = "switch.plug"
@@ -221,3 +223,35 @@ async def test_changing_an_option_applies_without_reloading(hass: HomeAssistant)
 
     assert hass.states.get("number.scooter_target_charge").state == "70.0"
     assert entry.runtime_data is coordinator
+
+
+async def test_a_version_1_entry_is_migrated(hass: HomeAssistant):
+    setup_test_component_platform(hass, SWITCH_DOMAIN, [MockToggleEntity("Plug", "on")])
+    assert await async_setup_component(
+        hass, SWITCH_DOMAIN, {SWITCH_DOMAIN: {"platform": "test"}}
+    )
+    hass.states.async_set(POWER, "0", {"unit_of_measurement": "W"})
+    hass.states.async_set(ENERGY, "0", {"unit_of_measurement": "kWh"})
+    hass.states.async_set(SOC, "40", {"unit_of_measurement": "%"})
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=1,
+        unique_id="plug-1",
+        title="Scooter",
+        data={
+            CONF_PLUG_SWITCH: PLUG,
+            CONF_POWER_ENTITY: POWER,
+            CONF_ENERGY_ENTITY: ENERGY,
+            CONF_SOC_ENTITY: SOC,
+            CONF_CAPACITY_WH: 720,
+        },
+        options={OPT_TARGET_SOC: 90.0, OPT_WH_PER_PERCENT: 6.0},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert entry.version == 2
+    assert OPT_WH_PER_PERCENT not in entry.options
+    assert entry.options[OPT_REST_MINUTES] == 30
+    assert entry.options[OPT_TARGET_SOC] == 90.0

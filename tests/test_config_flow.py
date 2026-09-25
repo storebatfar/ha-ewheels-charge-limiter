@@ -20,6 +20,7 @@ from custom_components.ewheels_charge_limiter.const import (
     CONF_SOC_ENTITY,
     DEFAULT_TARGET_SOC,
     DOMAIN,
+    OPT_REST_MINUTES,
     OPT_TARGET_SOC,
 )
 
@@ -60,6 +61,8 @@ async def test_happy_path_creates_an_entry(hass: HomeAssistant):
     assert result["title"] == "Scooter"
     assert result["data"][CONF_PLUG_SWITCH] == PLUG
     assert result["options"][OPT_TARGET_SOC] == DEFAULT_TARGET_SOC
+    assert result["result"].version == 2
+    assert result["result"].options[OPT_REST_MINUTES] == 30
 
 
 async def test_an_energy_only_plug_is_accepted(hass: HomeAssistant):
