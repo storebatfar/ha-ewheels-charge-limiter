@@ -70,9 +70,13 @@ It only learns from a reading it can trust:
   than *Wait before learning* (30 minutes by default) are shown but not learned
   from.
 - **Enough signal.** A charge must rise at least 10 points.
+- **Not used since.** A reading more than 15 points below where the charge
+  should have ended, or taken after *Treat a reading as stale after* (12 hours
+  by default), means the scooter has been ridden since. That charge is
+  abandoned rather than learned wrongly.
 
-A reading that fails the last two tests leaves the charge waiting for a better
-one. A new charge starting throws away any charge still waiting.
+A reading that is too soon or too small a rise leaves the charge waiting for a
+better one, and re-reading the same value later counts. A new charge starting throws away any charge still waiting.
 
 ## Fail toward charged
 

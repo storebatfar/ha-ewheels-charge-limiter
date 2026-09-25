@@ -135,8 +135,9 @@ Wh/pt:   5.0   4.8   4.4   3.8   2.8   2.4   3.6   5.6   7.6   9.4
 ## 3. Accepting a reading after a charge
 
 When a session completes, the *pending note* becomes
-`{start_soc, delivered_wh, cut_at}`, where `cut_at` is the UTC timestamp of the
-cut.
+`{start_soc, delivered_wh, cut_at, projected_end}`. `cut_at` is the UTC
+timestamp of the cut, and `projected_end` is where the model said the charge
+ended.
 
 A state-of-charge event after the cut is classified as follows. The event's
 **old state** is now inspected, so the SoC event path receives the whole event,
@@ -147,6 +148,7 @@ not just the new value.
 | Stale | old state was `unavailable`, `unknown`, or missing |
 | Early | real, but `now − cut_at < rest_minutes` |
 | Settled | real, and `now − cut_at ≥ rest_minutes` |
+| Used since | real, and either `now − cut_at > soc_staleness_hours`, or settled but more than 15 points below `projected_end` (`PLAUSIBLE_SHORTFALL_PCT`) |
 
 `rest_minutes` is a new option, **Wait before learning (minutes)**, default 30.
 
@@ -156,6 +158,7 @@ not just the new value.
 | Early | cleared | kept | no |
 | Settled, `end − start ≥ 10` | cleared | consumed and removed | yes: the charge is remembered, then the model is refitted |
 | Settled, `end − start < 10` | cleared | **kept** | no |
+| Used since | cleared | removed | no — the device has been used, so no later reading can measure that charge |
 
 "Projected charge cleared" means `session_start_soc` is set to `None`, so the
 sensor reads unknown and a real reading takes over.
@@ -163,8 +166,13 @@ sensor reads unknown and a real reading takes over.
 **The pending note is also removed** when a new session opens (bug 4), and when a
 session is stopped by hand (as today).
 
-The existing re-arm check on a low reading is unchanged, and runs after the
-classification above.
+A **same-value re-report** (HA's `state_reported`, fired when a sensor reports
+an unchanged value) is treated as a real reading, so a settled re-poll that
+repeats an early value still teaches.
+
+The re-arm check on a low reading runs only for real readings. A stale replay
+re-arms nothing, because arming would drop the projection, and a restart or a
+manual plug-on arms anyway.
 
 Bugs fixed by this section:
 
@@ -192,8 +200,9 @@ Migration from format 1:
 - `default_prior = stored wh_per_percent` (5.758 on the live install); if absent,
   the capacity seed.
 - `charges = []`.
-- A pending calibration without `cut_at` gets `cut_at = 0`. That treats it as
-  long settled, so the first real reading after upgrade can use it.
+- A pending calibration without `cut_at` gets `cut_at = 0`. Under the expiry
+  rule in §3 that makes it immediately expired, which is deliberate: the charge
+  it belongs to predates the upgrade and may have been ridden since.
 - An in-flight session resumes exactly as today.
 
 **Config entry options.** Config entry version 1 → 2:
