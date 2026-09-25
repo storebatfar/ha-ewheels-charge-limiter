@@ -55,6 +55,13 @@ MAX_REMEMBERED_CHARGES = 10
 STORAGE_VERSION = 2
 
 
+# Actions
+SERVICE_RECORD_CHARGE = "record_charge"
+ATTR_START_SOC = "start_soc"
+ATTR_END_SOC = "end_soc"
+ATTR_ENERGY_WH = "energy_wh"
+
+
 class ChargeState(StrEnum):
     """States of the charge limiter."""
 

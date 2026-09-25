@@ -93,5 +93,29 @@
     "number": {
       "target": { "name": "Target charge" }
     }
+  },
+  "services": {
+    "record_charge": {
+      "name": "Record a charge",
+      "description": "Remember a charge for the vase fit: where it started, where it settled, and how many wall watt-hours it took. The bands are refitted straight away.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Charge limiter",
+          "description": "Which configured plug the charge belongs to."
+        },
+        "start_soc": {
+          "name": "Start",
+          "description": "State of charge before charging, read with the pack at rest."
+        },
+        "end_soc": {
+          "name": "End",
+          "description": "State of charge after charging, once the pack has settled. At least 10 points above the start."
+        },
+        "energy_wh": {
+          "name": "Energy",
+          "description": "Wall watt-hours the charge took."
+        }
+      }
+    }
   }
 }

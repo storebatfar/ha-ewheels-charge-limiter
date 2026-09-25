@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
@@ -327,3 +328,53 @@ async def test_forget_in_the_vase_step_clears_remembered_charges(
     await hass.async_block_till_done()
 
     assert coordinator.remembered_charges == 0
+
+
+async def _record(hass: HomeAssistant, entry_id: str, start, end, energy) -> None:
+    await hass.services.async_call(
+        DOMAIN,
+        "record_charge",
+        {
+            "config_entry_id": entry_id,
+            "start_soc": start,
+            "end_soc": end,
+            "energy_wh": energy,
+        },
+        blocking=True,
+    )
+
+
+async def test_record_charge_remembers_and_refits(hass: HomeAssistant):
+    entry = await _setup(hass)
+    await _record(hass, entry.entry_id, 45, 97, 270.1)
+    coordinator = entry.runtime_data
+    assert coordinator.remembered_charges == 1
+    assert coordinator.bands != pytest.approx([720 / 100 / 0.87] * 10)
+
+
+async def test_record_charge_rejects_a_short_span(hass: HomeAssistant):
+    entry = await _setup(hass)
+    with pytest.raises(ServiceValidationError, match="at least 10 points"):
+        await _record(hass, entry.entry_id, 50, 55, 40)
+
+
+async def test_record_charge_rejects_an_unknown_entry(hass: HomeAssistant):
+    await _setup(hass)
+    with pytest.raises(ServiceValidationError, match="not a loaded"):
+        await _record(hass, "not-an-entry", 40, 80, 200)
+
+
+async def test_record_charge_mid_session_can_cut_the_plug(hass: HomeAssistant):
+    """A refit that lowers the requirement below what's delivered cuts now."""
+    entry = await _setup(hass)
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    hass.states.async_set(ENERGY, "0.25", {"unit_of_measurement": "kWh"})
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.scooter_status").state == "charging"
+
+    await _record(hass, entry.entry_id, 40, 80, 200)
+    await hass.async_block_till_done()
+
+    assert hass.states.get("sensor.scooter_status").state == "complete"
+    assert hass.states.get(PLUG).state == "off"

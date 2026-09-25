@@ -2,16 +2,72 @@
 
 from __future__ import annotations
 
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+import voluptuous as vol
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.const import ATTR_CONFIG_ENTRY_ID, Platform
+from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.typing import ConfigType
 
-from .const import DEFAULT_REST_MINUTES, OPT_REST_MINUTES, OPT_WH_PER_PERCENT
+from .const import (
+    ATTR_END_SOC,
+    ATTR_ENERGY_WH,
+    ATTR_START_SOC,
+    DEFAULT_REST_MINUTES,
+    DOMAIN,
+    OPT_REST_MINUTES,
+    OPT_WH_PER_PERCENT,
+    SERVICE_RECORD_CHARGE,
+)
 from .coordinator import ChargeLimiterCoordinator
 
 PLATFORMS: list[Platform] = [Platform.NUMBER, Platform.SENSOR, Platform.SWITCH]
 
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+_SOC = vol.All(vol.Coerce(float), vol.Range(min=0, max=100))
+
+RECORD_CHARGE_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_CONFIG_ENTRY_ID): cv.string,
+        vol.Required(ATTR_START_SOC): _SOC,
+        vol.Required(ATTR_END_SOC): _SOC,
+        vol.Required(ATTR_ENERGY_WH): vol.All(
+            vol.Coerce(float), vol.Range(min=0, min_included=False)
+        ),
+    }
+)
+
 type EWheelsConfigEntry = ConfigEntry[ChargeLimiterCoordinator]
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the actions, once for all entries."""
+
+    async def record_charge(call: ServiceCall) -> None:
+        entry = hass.config_entries.async_get_entry(call.data[ATTR_CONFIG_ENTRY_ID])
+        if (
+            entry is None
+            or entry.domain != DOMAIN
+            or entry.state is not ConfigEntryState.LOADED
+        ):
+            raise ServiceValidationError(
+                "That is not a loaded E-Wheels Charge Limiter entry"
+            )
+        try:
+            await entry.runtime_data.async_record_charge(
+                call.data[ATTR_START_SOC],
+                call.data[ATTR_END_SOC],
+                call.data[ATTR_ENERGY_WH],
+            )
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+
+    hass.services.async_register(
+        DOMAIN, SERVICE_RECORD_CHARGE, record_charge, schema=RECORD_CHARGE_SCHEMA
+    )
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: EWheelsConfigEntry) -> bool:
