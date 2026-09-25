@@ -36,6 +36,13 @@
     "step": {
       "init": {
         "title": "Options",
+        "menu_options": {
+          "settings": "Settings",
+          "vase": "Vase values (Wh per point)"
+        }
+      },
+      "settings": {
+        "title": "Settings",
         "data": {
           "target_soc": "Target state of charge (%)",
           "rearm_hysteresis": "Re-arm hysteresis (%)",
@@ -43,7 +50,30 @@
           "idle_close_minutes": "Close session after idle (minutes)",
           "max_session_hours": "Maximum session length (hours)",
           "soc_staleness_hours": "Treat a reading as stale after (hours)",
-          "wh_per_percent": "Learned Wh per percent (leave blank to keep learning)"
+          "rest_minutes": "Wait before learning (minutes)"
+        },
+        "data_description": {
+          "rest_minutes": "A battery reads high straight after charging. Readings taken sooner than this after the plug is cut are shown but not learned from."
+        }
+      },
+      "vase": {
+        "title": "Vase values",
+        "description": "Wall watt-hours needed per reported percentage point, for each 10-point band. A typed value is that band's starting point; learning keeps refining it from remembered charges. Leave a band blank to use the default.\n\nLearned now: {learned}",
+        "data": {
+          "band_0": "0–10 %",
+          "band_1": "10–20 %",
+          "band_2": "20–30 %",
+          "band_3": "30–40 %",
+          "band_4": "40–50 %",
+          "band_5": "50–60 %",
+          "band_6": "60–70 %",
+          "band_7": "70–80 %",
+          "band_8": "80–90 %",
+          "band_9": "90–100 %",
+          "forget_charges": "Forget remembered charges"
+        },
+        "data_description": {
+          "forget_charges": "Drops every remembered charge, so the bands fall back to their starting points. Use it if a charge taught something wrong."
         }
       }
     }

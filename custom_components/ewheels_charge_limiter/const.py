@@ -28,6 +28,9 @@ OPT_MAX_SESSION_HOURS = "max_session_hours"
 OPT_SOC_STALENESS_HOURS = "soc_staleness_hours"
 OPT_REST_MINUTES = "rest_minutes"
 
+# Options-flow only; never stored. Drops every remembered charge.
+OPT_FORGET_CHARGES = "forget_charges"
+
 # Defaults
 DEFAULT_TARGET_SOC = 80.0
 DEFAULT_REARM_HYSTERESIS = 5.0

@@ -17,6 +17,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import selector
 
 from .const import (
+    BAND_OPTION_KEYS,
     CONF_ALLOW_FOREIGN_METER,
     CONF_CAPACITY_WH,
     CONF_ENERGY_ENTITY,
@@ -32,13 +33,13 @@ from .const import (
     DEFAULT_TARGET_SOC,
     DOMAIN,
     OPT_CHARGING_POWER_THRESHOLD,
+    OPT_FORGET_CHARGES,
     OPT_IDLE_CLOSE_MINUTES,
     OPT_MAX_SESSION_HOURS,
     OPT_REARM_HYSTERESIS,
     OPT_REST_MINUTES,
     OPT_SOC_STALENESS_HOURS,
     OPT_TARGET_SOC,
-    OPT_WH_PER_PERCENT,
 )
 
 USER_SCHEMA = vol.Schema(
@@ -191,9 +192,14 @@ class EWheelsChargeLimiterConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class EWheelsChargeLimiterOptionsFlow(OptionsFlow):
-    """Handle the options flow."""
+    """Options: the tuning settings, and the vase's per-band starting points."""
 
     async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return self.async_show_menu(step_id="init", menu_options=["settings", "vase"])
+
+    async def async_step_settings(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Edit the tuning options."""
@@ -254,17 +260,69 @@ class EWheelsChargeLimiterOptionsFlow(OptionsFlow):
                 ): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=1, max=168, step=1)
                 ),
-                vol.Optional(
-                    OPT_WH_PER_PERCENT,
-                    description={"suggested_value": options.get(OPT_WH_PER_PERCENT)},
+                vol.Required(
+                    OPT_REST_MINUTES,
+                    default=options.get(OPT_REST_MINUTES, DEFAULT_REST_MINUTES),
                 ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=0.1,
-                        max=1000,
-                        step=0.1,
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
+                    selector.NumberSelectorConfig(min=0, max=240, step=1)
                 ),
             }
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(step_id="settings", data_schema=schema)
+
+    async def async_step_vase(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Type per-band starting points, or forget remembered charges.
+
+        Fields are pre-filled with typed values only, never learned ones:
+        pre-filling learned values would turn every one of them into a typed
+        value the moment the form is saved.
+        """
+        coordinator = getattr(self.config_entry, "runtime_data", None)
+
+        if user_input is not None:
+            forget = user_input.pop(OPT_FORGET_CHARGES, False)
+            options = {
+                key: value
+                for key, value in self.config_entry.options.items()
+                if key not in BAND_OPTION_KEYS
+            }
+            for key in BAND_OPTION_KEYS:
+                if user_input.get(key) is not None:
+                    options[key] = float(user_input[key])
+            if forget and coordinator is not None:
+                await coordinator.async_forget_charges()
+            return self.async_create_entry(data=options)
+
+        options = self.config_entry.options
+        fields: dict[Any, Any] = {
+            vol.Optional(
+                key, description={"suggested_value": options.get(key)}
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0.1,
+                    max=1000,
+                    step=0.01,
+                    unit_of_measurement="Wh",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            )
+            for key in BAND_OPTION_KEYS
+        }
+        fields[vol.Optional(OPT_FORGET_CHARGES, default=False)] = (
+            selector.BooleanSelector()
+        )
+        learned = (
+            " · ".join(
+                f"{i * 10}–{i * 10 + 10} %: {value:.2f}"
+                for i, value in enumerate(coordinator.bands)
+            )
+            if coordinator is not None
+            else "not loaded yet"
+        )
+        return self.async_show_form(
+            step_id="vase",
+            data_schema=vol.Schema(fields),
+            description_placeholders={"learned": learned},
+        )

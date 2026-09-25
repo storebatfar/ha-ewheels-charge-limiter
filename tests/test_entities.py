@@ -291,3 +291,39 @@ async def test_wh_per_percent_exposes_the_vase(hass: HomeAssistant):
     assert attributes["typed_bands"] == [4, 5, 6, 7]
     assert attributes["remembered_charges"] == 0
     assert attributes["default_prior"] == pytest.approx(8.276, abs=0.001)
+
+
+async def test_saving_vase_values_refits_without_a_reload(hass: HomeAssistant):
+    entry = await _setup(hass)
+    coordinator = entry.runtime_data
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "vase"}
+    )
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {"band_9": 12.0}
+    )
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data is coordinator
+    assert coordinator.bands[9] == pytest.approx(12.0)
+
+
+async def test_forget_in_the_vase_step_clears_remembered_charges(
+    hass: HomeAssistant,
+):
+    entry = await _setup(hass)
+    coordinator = entry.runtime_data
+    await coordinator.async_record_charge(40.0, 80.0, 200.0)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "vase"}
+    )
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {"forget_charges": True}
+    )
+    await hass.async_block_till_done()
+
+    assert coordinator.remembered_charges == 0

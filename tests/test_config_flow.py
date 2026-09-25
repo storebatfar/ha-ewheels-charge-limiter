@@ -128,6 +128,14 @@ async def test_the_same_switch_cannot_be_configured_twice(hass: HomeAssistant):
     assert result["reason"] == "already_configured"
 
 
+async def test_options_open_on_a_menu(hass: HomeAssistant):
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=PLUG, data={CONF_PLUG_SWITCH: PLUG})
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] is FlowResultType.MENU
+    assert result["menu_options"] == ["settings", "vase"]
+
+
 async def test_options_flow_updates_the_target(hass: HomeAssistant):
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -138,6 +146,9 @@ async def test_options_flow_updates_the_target(hass: HomeAssistant):
     entry.add_to_hass(hass)
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "settings"}
+    )
     assert result["type"] is FlowResultType.FORM
 
     result = await hass.config_entries.options.async_configure(
@@ -145,6 +156,34 @@ async def test_options_flow_updates_the_target(hass: HomeAssistant):
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][OPT_TARGET_SOC] == 90.0
+    assert result["data"][OPT_REST_MINUTES] == 30
+
+
+async def test_vase_step_stores_typed_bands_and_drops_cleared_ones(
+    hass: HomeAssistant,
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=PLUG,
+        data={CONF_PLUG_SWITCH: PLUG},
+        options={OPT_TARGET_SOC: 80.0, "band_3": 4.0},
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "vase"}
+    )
+    assert result["type"] is FlowResultType.FORM  # works on an unloaded entry
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"band_0": 5.0}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"]["band_0"] == 5.0
+    assert "band_3" not in result["data"]
+    assert result["data"][OPT_TARGET_SOC] == 80.0
+    assert "forget_charges" not in result["data"]
 
 
 async def _on_device(
