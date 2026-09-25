@@ -72,17 +72,26 @@ returns the point reached, capped at 100. It is used for Projected charge.
 remembered if `end_soc − start_soc ≥ 10` (`CALIBRATION_MIN_DELTA_PCT`, unchanged).
 
 **Fit.** Whenever the remembered charges or priors change, the bands are
-recomputed by minimising
+recomputed. The fit solves for a *correction* `d[i]` to each prior, with
+`b[i] = p[i] + d[i]`, by minimising
 
 ```
-Σ_s (A_s · b − E_s)²  +  λp Σ_i (b[i] − p[i])²  +  λs Σ_{i<9} (b[i] − b[i+1])²
+Σ_s (A_s · (p + d) − E_s)²  +  λp Σ_i d[i]²  +  λs Σ_{i<9} (d[i] − d[i+1])²
 ```
 
 where `A_s[i] = overlap([start_s, end_s], band i)` and `E_s` is the charge's
-energy. This is solved in closed form from the normal equations
+energy.
+
+Smoothing acts on the corrections, not the values. That matters because it means
+a typed prior survives unchanged where no charge covers its band. Smoothing the
+values themselves would blend a typed step into its neighbours even with no data.
+Where data does exist, neighbouring corrections move together, and bands without
+data inherit a smooth continuation of the correction.
+
+It is solved in closed form from the normal equations
 
 ```
-(AᵀA + λp·I + λs·L) b = Aᵀy + λp·p
+(AᵀA + λp·I + λs·L) d = Aᵀ(y − A·p)
 ```
 
 with `L` the path-graph Laplacian over the ten bands. The system is symmetric
@@ -90,12 +99,12 @@ positive definite whenever `λp > 0`, so it always has a unique solution. It is
 solved by Gaussian elimination with partial pivoting in plain Python, with no
 new dependencies.
 
-- `λp = 1.0` (`FIT_PRIOR_WEIGHT`) — weak, so priors only dominate where no
+- `λp = 1.0` (`FIT_PRIOR_WEIGHT`) — weak, so corrections stay near zero where no
   remembered charge covers a band.
 - `λs = 5.0` (`FIT_SMOOTHING_WEIGHT`) — chosen by simulation on the three real
-  charges. At 5 the fit reproduces all three within 2 %; at 25 the top band is
-  underfitted by 7 %.
-- With no remembered charges, the fit returns the priors plus smoothing.
+  charges. At 5 the fit replays all three within 3 %: 88→97 at −2.4 %, 65→96 at
+  −0.5 % and 45→97 at +0.4 %. At 25 the top band is underfitted by 7 %.
+- With no remembered charges, the fit returns the priors exactly.
 
 After solving, each band is clamped to `[0.25, 3.0] × capacity seed`
 (`BAND_CLAMP_LOW`, `BAND_CLAMP_HIGH`). The previous `[0.5, 2.0]` clamp is
@@ -259,10 +268,9 @@ Test-first: every behaviour gets a failing test before code.
   - partial-band overlap;
   - `energy_between` across band edges;
   - `soc_after` as the inverse of `energy_between`, capped at 100;
-  - the fit reproduces the three real charges within 2 %;
-  - uncovered bands stay close to prior and smooth;
+  - the fit replays the three real charges within 3 %;
+  - with no charges, the fit returns typed priors exactly, including a step;
   - clamps apply;
-  - no charges returns the priors.
 - **Coordinator:**
   - required energy and projection come from the bands;
   - a target change recomputes from the bands;
