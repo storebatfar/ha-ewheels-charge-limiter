@@ -42,18 +42,37 @@ Changing the target mid-charge works: the requirement is re-measured against
 the new target straight away, and if more has already been delivered than the
 new target calls for, the plug is cut on the spot.
 
-## Self-calibration
+## Self-calibration: the vase
 
-Rather than assuming a charger efficiency, the integration learns **wall
-watt-hours per percent of charge** from completed sessions. That single number
-absorbs both charger losses and any non-linearity in how the device reports
-percent, which on cheap BMS firmware is usually the larger error.
+A pack's reported percent is not linear in energy. On the scooter this was
+written for, a point near the top costs about three times the wall energy of
+one in the middle. Picture a vase that is narrow at the bottom and wide at the
+top: the same cup of water raises the level a lot low down and very little near
+the brim.
 
-It is seeded from the configured capacity and corrected after each session by
-comparing the watt-hours delivered against the actual change in state of
-charge. Expect it to converge within two or three charges, and to keep tracking
-as the pack ages. The current value is exposed as a sensor, and can be reset
-from the options if it ever goes wrong.
+So instead of one Wh-per-percent, the integration keeps **ten 10-point bands**,
+each with its own wall watt-hours per reported point. The energy needed for a
+charge is the sum across the bands it passes through, which is why it lands on
+target whether it starts at 30 % or 75 %.
+
+Each band starts from a **starting point**: a value you typed for it under
+*Vase values*, or otherwise the default seeded from the configured capacity.
+After every completed charge, the integration remembers where it started, where
+it settled and how much energy it took, keeping the **last ten charges**. It
+then refits all ten bands to explain them together, gently pulled toward the
+starting points and toward neighbouring bands. Charges from different start
+points are what reveal the vase's shape.
+
+It only learns from a reading it can trust:
+
+- **Real news only.** A value replayed after a reconnect or a restart is ignored.
+- **Settled.** The pack reads high straight after charging, so readings sooner
+  than *Wait before learning* (30 minutes by default) are shown but not learned
+  from.
+- **Enough signal.** A charge must rise at least 10 points.
+
+A reading that fails the last two tests leaves the charge waiting for a better
+one. A new charge starting throws away any charge still waiting.
 
 ## Fail toward charged
 
@@ -112,7 +131,7 @@ vendor app — are detected and treated identically.
 | `sensor` Session energy | Watt-hours delivered this session |
 | `sensor` Charge power | What the plug is drawing right now; only when a power sensor is configured |
 | `sensor` Projected charge | Estimated charge right now |
-| `sensor` Wh per percent | The learned calibration |
+| `sensor` Wh per percent | Average wall Wh per point from the latest reading to the target; attributes list all ten bands, which are typed, and how many charges are remembered |
 
 ## Installation
 
@@ -136,7 +155,16 @@ switch gets to cut mains.
 | Close session after idle | 10 min |
 | Maximum session length | 8 h |
 | Treat a reading as stale after | 12 h |
-| Learned Wh per percent | learned; blank keeps learning |
+| Wait before learning | 30 min |
+| Vase values (per 10-point band) | blank: the default starting point |
+
+## Actions
+
+`ewheels_charge_limiter.record_charge` remembers a charge measured some other
+way: start %, settled end %, and wall watt-hours. It uses the same rules as an
+automatic charge, so the end must be at least 10 points above the start. The
+bands are refitted straight away. It is useful for seeding the vase from
+charges you already know, or for putting back one whose learning was lost.
 
 ## Not included
 
