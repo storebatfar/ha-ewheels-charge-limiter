@@ -17,6 +17,9 @@ CONF_CAPACITY_WH = "capacity_wh"
 # that lives on a different device from the switch.
 CONF_ALLOW_FOREIGN_METER = "allow_foreign_meter"
 
+# Reconfigure-flow only; never stored. Drops learning when the meter changes.
+CONF_FORGET_LEARNING = "forget_learning"
+
 # Option keys
 OPT_TARGET_SOC = "target_soc"
 OPT_REARM_HYSTERESIS = "rearm_hysteresis"

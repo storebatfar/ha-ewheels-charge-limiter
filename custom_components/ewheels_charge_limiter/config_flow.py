@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import voluptuous as vol
@@ -21,6 +22,7 @@ from .const import (
     CONF_ALLOW_FOREIGN_METER,
     CONF_CAPACITY_WH,
     CONF_ENERGY_ENTITY,
+    CONF_FORGET_LEARNING,
     CONF_PLUG_SWITCH,
     CONF_POWER_ENTITY,
     CONF_SOC_ENTITY,
@@ -41,33 +43,48 @@ from .const import (
     OPT_SOC_STALENESS_HOURS,
     OPT_TARGET_SOC,
 )
+from .coordinator import async_forget_stored_learning
+
+# The plug, its meters and the battery: asked at setup and again on reconfigure.
+_SETUP_FIELDS: dict[Any, Any] = {
+    vol.Required(CONF_PLUG_SWITCH): selector.EntitySelector(
+        selector.EntitySelectorConfig(domain="switch")
+    ),
+    vol.Optional(CONF_POWER_ENTITY): selector.EntitySelector(
+        selector.EntitySelectorConfig(domain="sensor", device_class="power")
+    ),
+    vol.Optional(CONF_ENERGY_ENTITY): selector.EntitySelector(
+        selector.EntitySelectorConfig(domain="sensor", device_class="energy")
+    ),
+    vol.Required(CONF_SOC_ENTITY): selector.EntitySelector(
+        selector.EntitySelectorConfig(domain="sensor", device_class="battery")
+    ),
+    vol.Required(CONF_CAPACITY_WH, default=720): selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=50,
+            max=20000,
+            step=10,
+            unit_of_measurement="Wh",
+            mode=selector.NumberSelectorMode.BOX,
+        )
+    ),
+}
+_SETUP_KEYS = tuple(str(marker) for marker in _SETUP_FIELDS)
 
 USER_SCHEMA = vol.Schema(
+    {vol.Required(CONF_NAME, default="Scooter"): selector.TextSelector(), **_SETUP_FIELDS}
+)
+
+# No name: the title names every entity, and HA's own rename covers it.
+RECONFIGURE_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_NAME, default="Scooter"): selector.TextSelector(),
-        vol.Required(CONF_PLUG_SWITCH): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="switch")
-        ),
-        vol.Optional(CONF_POWER_ENTITY): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="sensor", device_class="power")
-        ),
-        vol.Optional(CONF_ENERGY_ENTITY): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="sensor", device_class="energy")
-        ),
-        vol.Required(CONF_SOC_ENTITY): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="sensor", device_class="battery")
-        ),
-        vol.Required(CONF_CAPACITY_WH, default=720): selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                min=50,
-                max=20000,
-                step=10,
-                unit_of_measurement="Wh",
-                mode=selector.NumberSelectorMode.BOX,
-            )
-        ),
+        **_SETUP_FIELDS,
+        vol.Optional(CONF_FORGET_LEARNING, default=True): selector.BooleanSelector(),
     }
 )
+
+# Flow-time decisions, never configuration.
+_FLOW_ONLY_KEYS = (CONF_ALLOW_FOREIGN_METER, CONF_FORGET_LEARNING)
 
 
 def _device_of(hass: HomeAssistant, entity_id: str | None) -> str | None:
@@ -103,6 +120,37 @@ def _meter_on_another_device(
     )
 
 
+def _validate(hass: HomeAssistant, user_input: dict[str, Any]) -> str | None:
+    """The error key for a submitted plug-and-meters form, or None if it's fine."""
+    power = user_input.get(CONF_POWER_ENTITY)
+    energy = user_input.get(CONF_ENERGY_ENTITY)
+    if not power and not energy:
+        # Without a meter there is nothing to count, so the watt-hour
+        # projection could never terminate.
+        return "no_meter"
+    if not user_input.get(CONF_ALLOW_FOREIGN_METER) and _meter_on_another_device(
+        hass, user_input[CONF_PLUG_SWITCH], power, energy
+    ):
+        return "meter_not_on_plug"
+    return None
+
+
+def _meters_changed(old: Mapping[str, Any], new: Mapping[str, Any]) -> bool:
+    """True when the entities that count watt-hours are not the same ones."""
+    return any(
+        old.get(key) != new.get(key) for key in (CONF_POWER_ENTITY, CONF_ENERGY_ENTITY)
+    )
+
+
+def _with_override(schema: vol.Schema, offer: bool) -> vol.Schema:
+    """Add the accept-a-foreign-meter box, once the mismatch has been shown."""
+    if not offer:
+        return schema
+    return schema.extend(
+        {vol.Optional(CONF_ALLOW_FOREIGN_METER, default=False): selector.BooleanSelector()}
+    )
+
+
 def _default_options() -> dict[str, Any]:
     return {
         OPT_TARGET_SOC: DEFAULT_TARGET_SOC,
@@ -131,23 +179,10 @@ class EWheelsChargeLimiterConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Collect the plug entities, the battery, and its capacity."""
         errors: dict[str, str] = {}
-        offer_override = False
 
         if user_input is not None:
-            power = user_input.get(CONF_POWER_ENTITY)
-            energy = user_input.get(CONF_ENERGY_ENTITY)
-
-            if not power and not energy:
-                # Without a meter there is nothing to count, so the watt-hour
-                # projection could never terminate.
-                errors["base"] = "no_meter"
-            elif not user_input.get(CONF_ALLOW_FOREIGN_METER) and (
-                _meter_on_another_device(
-                    self.hass, user_input[CONF_PLUG_SWITCH], power, energy
-                )
-            ):
-                errors["base"] = "meter_not_on_plug"
-                offer_override = True
+            if error := _validate(self.hass, user_input):
+                errors["base"] = error
             else:
                 # The switch is what we actually control, so it is the natural
                 # identity for this entry.
@@ -159,26 +194,71 @@ class EWheelsChargeLimiterConfigFlow(ConfigFlow, domain=DOMAIN):
                     data={
                         key: value
                         for key, value in user_input.items()
-                        if key != CONF_ALLOW_FOREIGN_METER
+                        if key not in _FLOW_ONLY_KEYS
                     },
                     options=_default_options(),
                 )
 
-        schema = USER_SCHEMA
-        if offer_override:
-            # Only surfaced once the mismatch has been pointed out, so the
-            # normal path stays a plain form.
-            schema = schema.extend(
-                {
-                    vol.Optional(
-                        CONF_ALLOW_FOREIGN_METER, default=False
-                    ): selector.BooleanSelector()
-                }
-            )
-
+        # The override box is only surfaced once the mismatch has been pointed
+        # out, so the normal path stays a plain form.
+        schema = _with_override(USER_SCHEMA, errors.get("base") == "meter_not_on_plug")
         return self.async_show_form(
             step_id="user",
             data_schema=self.add_suggested_values_to_schema(schema, user_input or {}),
+            errors=errors,
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Swap the plug, its meters or the battery on an existing entry.
+
+        Keeps the entry, so its entities, device, area and options - and
+        everything on dashboards and in automations that points at them -
+        survive. Refused mid-charge: a session counts from a baseline taken on
+        the old meter, so swapping meters under it would miscount.
+        """
+        entry = self._get_reconfigure_entry()
+        coordinator = getattr(entry, "runtime_data", None)
+        if coordinator is not None and coordinator.session_open:
+            return self.async_abort(reason="session_open")
+
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            if error := _validate(self.hass, user_input):
+                errors["base"] = error
+            else:
+                new_plug = user_input[CONF_PLUG_SWITCH]
+                if new_plug != entry.unique_id:
+                    await self.async_set_unique_id(new_plug)
+                    self._abort_if_unique_id_configured()
+
+                if user_input.get(CONF_FORGET_LEARNING, True) and _meters_changed(
+                    entry.data, user_input
+                ):
+                    # Learned charges are counted in the old meter's units.
+                    if coordinator is not None:
+                        await coordinator.async_forget_charges(include_pending=True)
+                    else:
+                        await async_forget_stored_learning(self.hass, entry.entry_id)
+
+                data = {
+                    **{k: v for k, v in entry.data.items() if k not in _SETUP_KEYS},
+                    **{k: v for k, v in user_input.items() if k not in _FLOW_ONLY_KEYS},
+                }
+                return self.async_update_reload_and_abort(
+                    entry, unique_id=new_plug, data=data
+                )
+
+        schema = _with_override(
+            RECONFIGURE_SCHEMA, errors.get("base") == "meter_not_on_plug"
+        )
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=self.add_suggested_values_to_schema(
+                schema, user_input if user_input is not None else dict(entry.data)
+            ),
             errors=errors,
         )
 

@@ -149,6 +149,25 @@ watt-hours. You name the entities outright rather than picking a device: it is
 one screen either way, and nothing is inferred behind your back about which
 switch gets to cut mains.
 
+## Changing the plug, meters or battery
+
+**Settings → Devices & Services → E-Wheels Charge Limiter → ⋮ → Reconfigure**
+shows the setup screen again, filled in with the current choices. Change what
+you need; the entry reloads. Its entities, device, area and options are kept, so
+dashboards and automations pointing at them carry on working.
+
+Two things to know:
+
+- **Changing a meter forgets what was learned**, by default. Every remembered
+  charge was counted in the old meter's units, and two meters rarely agree — a
+  replaced plug can easily read tens of percent differently. Starting again is
+  correct; the vase relearns within a few charges. Untick the box only when
+  correcting a mistake with the same meter. Changing just the switch, the
+  battery sensor or the capacity keeps everything.
+- **It refuses while a charge is being counted.** The session's watt-hours are
+  measured from a baseline taken on the old meter, so swapping meters under it
+  would miscount. Let the charge finish, or stop it, first.
+
 ## Options
 
 | Option | Default |

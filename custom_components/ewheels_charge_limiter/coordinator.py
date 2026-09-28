@@ -127,6 +127,18 @@ class _LimiterStore(Store[dict[str, Any]]):
     ) -> dict[str, Any]:
         return migrate_stored_data(old_major_version, old_data)
 
+
+async def async_forget_stored_learning(hass: HomeAssistant, entry_id: str) -> None:
+    """Clear what an unloaded entry has learned, straight in storage.
+
+    For when there is no coordinator to ask. The bands need no clearing: they
+    are refitted from whatever charges remain every time an entry loads.
+    """
+    store = _LimiterStore(hass, STORAGE_VERSION, f"{DOMAIN}.{entry_id}")
+    if (data := await store.async_load()) is None:
+        return
+    await store.async_save({**data, "charges": [], "pending_calibration": None})
+
 class ChargeLimiterCoordinator:
     """Owns the state machine for one configured plug."""
 
@@ -266,6 +278,16 @@ class ChargeLimiterCoordinator:
         if soc is None or soc >= target:
             return band_at(self.bands, target)
         return energy_between(self.bands, soc, target) / (target - soc)
+
+    @property
+    def plug_entity_id(self) -> str:
+        """The switch that cuts mains to the charger."""
+        return self._plug_switch
+
+    @property
+    def session_open(self) -> bool:
+        """True while a charge is being counted."""
+        return self.state in (ChargeState.CHARGING, ChargeState.UNCALIBRATED)
 
     @property
     def power_entity_id(self) -> str | None:
@@ -426,9 +448,15 @@ class ChargeLimiterCoordinator:
             )
         await self._async_after_refit()
 
-    async def async_forget_charges(self) -> None:
-        """Drop every remembered charge; the bands fall back to their priors."""
+    async def async_forget_charges(self, *, include_pending: bool = False) -> None:
+        """Drop every remembered charge; the bands fall back to their priors.
+
+        With include_pending, a finished charge still waiting for its settled
+        reading goes too - it was counted the same way as the rest.
+        """
         self._charges.clear()
+        if include_pending:
+            self._pending_calibration = None
         self._refit()
         await self._async_after_refit()
 

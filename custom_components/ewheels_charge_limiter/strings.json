@@ -22,6 +22,28 @@
           "capacity_wh": "Usable pack capacity. Only used to seed the estimate, which then corrects itself over the first few charges.",
           "allow_foreign_meter": "Tick only if the meter really does measure this charger, for example a separate clamp meter."
         }
+      },
+      "reconfigure": {
+        "title": "Change plug, meters or battery",
+        "description": "Swap the plug, its meters or the battery on this limiter. Its entities, options and everything that points at them stay as they are.",
+        "data": {
+          "plug_switch": "Plug switch",
+          "power_entity": "Power sensor",
+          "energy_entity": "Energy sensor",
+          "soc_entity": "State of charge sensor",
+          "capacity_wh": "Battery capacity (Wh)",
+          "forget_learning": "Forget learned charges if the meter changes",
+          "allow_foreign_meter": "Use this meter anyway"
+        },
+        "data_description": {
+          "plug_switch": "The switch that cuts mains to the charger.",
+          "power_entity": "Instantaneous power on that plug, in watts. Used to detect that charging has started, and to count energy if there is no energy sensor.",
+          "energy_entity": "Cumulative energy on that plug. Preferred over the power sensor when both exist, because it is exact.",
+          "soc_entity": "Battery percentage. Read just before a charge starts; it does not need to update during charging.",
+          "capacity_wh": "Usable pack capacity. Only used to seed the estimate, which then corrects itself over the first few charges.",
+          "forget_learning": "Recommended. What was learned is counted in the old meter's units, and a different meter rarely agrees with it. Only untick if you are correcting a mistake and the meter is really the same. Has no effect if the meters are unchanged.",
+          "allow_foreign_meter": "Tick only if the meter really does measure this charger, for example a separate clamp meter."
+        }
       }
     },
     "error": {
@@ -29,7 +51,9 @@
       "meter_not_on_plug": "That meter belongs to a different device than the switch, so it is probably not measuring the charger. Counting the wrong watt-hours would cut the charge at an arbitrary point. Pick a meter on the same plug, or tick the box below if you are sure."
     },
     "abort": {
-      "already_configured": "This plug is already configured."
+      "already_configured": "This plug is already configured.",
+      "reconfigure_successful": "Updated. The limiter has reloaded with the new settings.",
+      "session_open": "A charge is being counted right now. Wait until it has finished, or stop it, then try again - swapping meters mid-charge would count from the wrong starting point."
     }
   },
   "options": {
