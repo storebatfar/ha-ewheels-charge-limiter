@@ -160,8 +160,10 @@ Two things to know:
 
 - **Changing a meter forgets what was learned**, by default. Every remembered
   charge was counted in the old meter's units, and two meters rarely agree — a
-  replaced plug can easily read tens of percent differently. Starting again is
-  correct; the vase relearns within a few charges. Untick the box only when
+  replaced plug can easily read tens of percent differently. That includes the
+  starting value carried over from a learned figure in older versions, which
+  goes back to the estimate from battery capacity. Starting again is correct;
+  the vase relearns within a few charges. Untick the box only when
   correcting a mistake with the same meter. Changing just the switch, the
   battery sensor or the capacity keeps everything.
 - **It refuses while a charge is being counted.** The session's watt-hours are

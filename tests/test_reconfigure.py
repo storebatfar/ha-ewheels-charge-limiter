@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from homeassistant.components.sensor import SensorDeviceClass
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
@@ -319,6 +320,103 @@ async def test_learning_survives_when_the_meters_are_unchanged(hass: HomeAssista
     await hass.async_block_till_done()
 
     assert entry.runtime_data.remembered_charges == 1
+
+
+SEED = 720 / 100 / 0.87  # the capacity-derived starting value
+
+
+async def test_changing_the_meter_resets_a_carried_starting_value(
+    hass: HomeAssistant,
+):
+    """A default prior carried over from an old learned value is in the old
+    meter's units too - clearing the charges but keeping it would leave every
+    band at the old meter's scale."""
+    entry = await _loaded_entry(hass)
+    entry.runtime_data._default_prior = 6.0
+
+    result = await entry.start_reconfigure_flow(hass)
+    await hass.config_entries.flow.async_configure(result["flow_id"], _shelly())
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data.default_prior == pytest.approx(SEED)
+    assert entry.runtime_data.bands == pytest.approx([SEED] * 10)
+
+
+async def test_the_reset_follows_a_capacity_changed_at_the_same_time(
+    hass: HomeAssistant,
+):
+    entry = await _loaded_entry(hass)
+    entry.runtime_data._default_prior = 6.0
+
+    result = await entry.start_reconfigure_flow(hass)
+    await hass.config_entries.flow.async_configure(
+        result["flow_id"], _shelly(**{CONF_CAPACITY_WH: 800})
+    )
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data.default_prior == pytest.approx(800 / 100 / 0.87)
+
+
+async def test_an_unchanged_meter_keeps_the_starting_value(hass: HomeAssistant):
+    entry = await _loaded_entry(hass)
+    entry.runtime_data._default_prior = 6.0
+
+    result = await entry.start_reconfigure_flow(hass)
+    await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        _shelly(**{CONF_PLUG_SWITCH: PLUG, CONF_POWER_ENTITY: POWER,
+                   CONF_ENERGY_ENTITY: ENERGY, CONF_CAPACITY_WH: 720}),
+    )
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data.default_prior == pytest.approx(6.0)
+
+
+async def test_keeping_learning_keeps_the_starting_value(hass: HomeAssistant):
+    entry = await _loaded_entry(hass)
+    entry.runtime_data._default_prior = 6.0
+
+    result = await entry.start_reconfigure_flow(hass)
+    await hass.config_entries.flow.async_configure(
+        result["flow_id"], _shelly(**{CONF_FORGET_LEARNING: False})
+    )
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data.default_prior == pytest.approx(6.0)
+
+
+async def test_the_options_forget_still_keeps_the_starting_value(
+    hass: HomeAssistant,
+):
+    """Forgetting remembered charges from the options is a different act: same
+    meter, so the starting value is still valid."""
+    entry = await _loaded_entry(hass)
+    entry.runtime_data._default_prior = 6.0
+    await entry.runtime_data.async_record_charge(40, 80, 250)
+
+    await entry.runtime_data.async_forget_charges()
+
+    assert entry.runtime_data.default_prior == pytest.approx(6.0)
+
+
+async def test_an_unloaded_entry_resets_the_starting_value_in_storage(
+    hass: HomeAssistant, hass_storage
+):
+    _seed_states(hass)
+    hass_storage[STORAGE_KEY] = {
+        "version": 2,
+        "minor_version": 1,
+        "key": STORAGE_KEY,
+        "data": {"state": "armed", "enabled": True, "default_prior": 6.0,
+                 "charges": [], "pending_calibration": None},
+    }
+    entry = _entry(hass)
+
+    result = await entry.start_reconfigure_flow(hass)
+    await hass.config_entries.flow.async_configure(result["flow_id"], _shelly())
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data.default_prior == pytest.approx(SEED)
 
 
 async def test_an_unloaded_entry_forgets_from_storage(

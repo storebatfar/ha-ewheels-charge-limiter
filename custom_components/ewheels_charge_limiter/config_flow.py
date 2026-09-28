@@ -239,7 +239,7 @@ class EWheelsChargeLimiterConfigFlow(ConfigFlow, domain=DOMAIN):
                 ):
                     # Learned charges are counted in the old meter's units.
                     if coordinator is not None:
-                        await coordinator.async_forget_charges(include_pending=True)
+                        await coordinator.async_forget_meter()
                     else:
                         await async_forget_stored_learning(self.hass, entry.entry_id)
 

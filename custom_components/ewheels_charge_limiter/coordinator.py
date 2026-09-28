@@ -129,15 +129,18 @@ class _LimiterStore(Store[dict[str, Any]]):
 
 
 async def async_forget_stored_learning(hass: HomeAssistant, entry_id: str) -> None:
-    """Clear what an unloaded entry has learned, straight in storage.
+    """Clear what an unloaded entry measured on its old meter, straight in storage.
 
-    For when there is no coordinator to ask. The bands need no clearing: they
-    are refitted from whatever charges remain every time an entry loads.
+    For when there is no coordinator to ask; the same ground as
+    ChargeLimiterCoordinator.async_forget_meter. The bands need no clearing:
+    they are refitted from whatever remains every time an entry loads.
     """
     store = _LimiterStore(hass, STORAGE_VERSION, f"{DOMAIN}.{entry_id}")
     if (data := await store.async_load()) is None:
         return
-    await store.async_save({**data, "charges": [], "pending_calibration": None})
+    await store.async_save(
+        {**data, "charges": [], "pending_calibration": None, "default_prior": None}
+    )
 
 class ChargeLimiterCoordinator:
     """Owns the state machine for one configured plug."""
@@ -377,7 +380,11 @@ class ChargeLimiterCoordinator:
         return {
             "state": str(self.state),
             "enabled": self.enabled,
-            "default_prior": self._default_prior,
+            # A prior that is just the seed is stored as unset, so it follows
+            # the capacity if that changes - rather than pinning the old one.
+            "default_prior": (
+                None if self._default_prior == self._seed else self._default_prior
+            ),
             "charges": self._charges,
             "bands": self.bands,
             "required_wh": self.required_wh,
@@ -448,15 +455,24 @@ class ChargeLimiterCoordinator:
             )
         await self._async_after_refit()
 
-    async def async_forget_charges(self, *, include_pending: bool = False) -> None:
-        """Drop every remembered charge; the bands fall back to their priors.
+    async def async_forget_charges(self) -> None:
+        """Drop every remembered charge; the bands fall back to their priors."""
+        self._charges.clear()
+        self._refit()
+        await self._async_after_refit()
 
-        With include_pending, a finished charge still waiting for its settled
-        reading goes too - it was counted the same way as the rest.
+    async def async_forget_meter(self) -> None:
+        """Forget everything that was measured on the meter being replaced.
+
+        That is more than the remembered charges: a finished charge still
+        waiting for its settled reading was counted the same way, and so was a
+        default prior carried over from an older learned value. Keeping that
+        prior would leave every band at the old meter's scale. It goes back to
+        the capacity-derived seed, which a new meter has not contradicted yet.
         """
         self._charges.clear()
-        if include_pending:
-            self._pending_calibration = None
+        self._pending_calibration = None
+        self._default_prior = self._seed
         self._refit()
         await self._async_after_refit()
 
