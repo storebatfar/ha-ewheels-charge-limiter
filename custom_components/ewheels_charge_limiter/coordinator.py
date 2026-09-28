@@ -169,6 +169,15 @@ class ChargeLimiterCoordinator:
         self._pending_calibration: dict[str, float] | None = None
         self._session_started_at: float | None = None
 
+        # The last reading the pack really gave, as opposed to a value the
+        # node replays after a reconnect with a fresh timestamp.
+        self._real_soc: float | None = None
+        self._real_soc_at: float | None = None
+        # Charge to full: asked for, and whether the open session carries it.
+        self._full_requested: bool = False
+        self._unlimited: bool = False
+        self._cancel_fresh: Callable[[], None] | None = None
+
         self._store: Store[dict[str, Any]] = _LimiterStore(
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}"
         )
@@ -293,6 +302,67 @@ class ChargeLimiterCoordinator:
         return self.state in (ChargeState.CHARGING, ChargeState.UNCALIBRATED)
 
     @property
+    def target_reached(self) -> bool:
+        """True when a fresh reading says the pack is at or above the target.
+
+        Exactly the test a new charge applies before refusing to start, so a
+        dashboard can show why pressing start would do nothing. False while
+        disabled: nothing is limited then, so there is no target to reach.
+        """
+        if not self.enabled:
+            return False
+        soc = self._fresh_soc()
+        return soc is not None and soc >= self.target_soc
+
+    def _fresh_soc(self) -> float | None:
+        """The state of charge to trust for a new charge, or None if too old.
+
+        Taken from the last real reading - a change between two numbers, or a
+        re-poll of the same one - never from a value the node replays after a
+        reconnect: that arrives with a new timestamp but can be a day old, or
+        not even the latest value. Until a real reading has been seen at all
+        (a fresh install, or the first start after upgrading), the entity's
+        own timestamp is used, as it always was.
+        """
+        now = dt_util.utcnow()
+        if self._real_soc_at is not None:
+            if now.timestamp() - self._real_soc_at > self._staleness_seconds:
+                return None
+            return self._real_soc
+        state = self.hass.states.get(self._soc_entity)
+        soc = _as_float(state)
+        if soc is None or state is None:
+            return None
+        if (now - state.last_updated).total_seconds() > self._staleness_seconds:
+            return None
+        return soc
+
+    @callback
+    def _schedule_freshness_expiry(self) -> None:
+        """Push an update when the real reading goes stale.
+
+        Nothing else changes at that moment, so without this Target reached
+        would keep saying yes long after the reading stopped meaning anything.
+        """
+        if self._cancel_fresh is not None:
+            self._cancel_fresh()
+            self._cancel_fresh = None
+        if self._real_soc_at is None:
+            return
+        remaining = (
+            self._real_soc_at + self._staleness_seconds - dt_util.utcnow().timestamp()
+        )
+        if remaining > 0:
+            self._cancel_fresh = async_call_later(
+                self.hass, remaining + 1, self._on_freshness_expired
+            )
+
+    @callback
+    def _on_freshness_expired(self, _now: Any) -> None:
+        self._cancel_fresh = None
+        self._notify()
+
+    @property
     def power_entity_id(self) -> str | None:
         """The configured power meter, if there is one."""
         return self._power_entity
@@ -323,6 +393,7 @@ class ChargeLimiterCoordinator:
         if stored := await self._store.async_load():
             self._restore(stored)
         self._refit()
+        self._schedule_freshness_expiry()
 
         watched = [self._plug_switch, self._soc_entity]
         if self._power_entity:
@@ -358,6 +429,9 @@ class ChargeLimiterCoordinator:
     async def async_shutdown(self) -> None:
         """Flush state and detach. Called on unload and on HA shutdown."""
         self._cancel_timers()
+        if self._cancel_fresh is not None:
+            self._cancel_fresh()
+            self._cancel_fresh = None
         for unsubscribe in self._unsubscribes:
             unsubscribe()
         self._unsubscribes.clear()
@@ -372,6 +446,10 @@ class ChargeLimiterCoordinator:
         self.session_start_soc = stored.get("session_start_soc")
         self._session_started_at = stored.get("session_started_at")
         self._pending_calibration = stored.get("pending_calibration")
+        self._real_soc = stored.get("real_soc")
+        self._real_soc_at = stored.get("real_soc_at")
+        self._full_requested = stored.get("full_requested", False)
+        self._unlimited = stored.get("unlimited", False)
         if meter := stored.get("meter"):
             self._meter = EnergyMeter.from_dict(meter)
 
@@ -391,6 +469,10 @@ class ChargeLimiterCoordinator:
             "session_start_soc": self.session_start_soc,
             "session_started_at": self._session_started_at,
             "pending_calibration": self._pending_calibration,
+            "real_soc": self._real_soc,
+            "real_soc_at": self._real_soc_at,
+            "full_requested": self._full_requested,
+            "unlimited": self._unlimited,
             "meter": self._meter.as_dict(),
         }
 
@@ -444,6 +526,29 @@ class ChargeLimiterCoordinator:
         """
         await self._async_switch_plug(on)
 
+    async def async_charge_to_full(self) -> None:
+        """Charge to full once: this charge, or the next, ignores the target.
+
+        For a deliberate full charge - a top-up above the target, or the
+        occasional full cycle a pack needs to balance its cells. The charger
+        ends it; afterwards limiting resumes. It switches the plug on, being
+        an explicit instruction to charge, like the Plug switch.
+        """
+        if not self.enabled:
+            # Nothing limits a charge while disabled; just do as asked.
+            await self._async_switch_plug(True)
+            return
+        if self.state is ChargeState.CHARGING:
+            self._unlimited = True
+            self.required_wh = None
+        elif self.state is not ChargeState.UNCALIBRATED:
+            # An uncalibrated charge is unlimited already.
+            self._full_requested = True
+        await self._async_persist()
+        self._notify()
+        if self.plug_is_on is not True:
+            await self._async_switch_plug(True)
+
     async def async_record_charge(
         self, start_soc: float, end_soc: float, energy_wh: float
     ) -> None:
@@ -488,6 +593,7 @@ class ChargeLimiterCoordinator:
         """
         self._refit()
         self._restart_cap_timer()
+        self._schedule_freshness_expiry()
         await self._async_recompute_required_wh()
         self._notify()
 
@@ -499,9 +605,14 @@ class ChargeLimiterCoordinator:
         and the charge would run on to the old target.
 
         An uncalibrated session is deliberately left alone: it has no starting
-        point to measure from, which is exactly why it carries no limit.
+        point to measure from, which is exactly why it carries no limit. So is
+        a charge to full, which was asked to ignore the target.
         """
-        if self.state is not ChargeState.CHARGING or self.session_start_soc is None:
+        if (
+            self.state is not ChargeState.CHARGING
+            or self.session_start_soc is None
+            or self._unlimited
+        ):
             return
 
         self.required_wh = energy_between(
@@ -558,8 +669,13 @@ class ChargeLimiterCoordinator:
             return
 
         if new_state.state == "off":
+            # A charge to full that never began lapses with the plug, rather
+            # than waiting to surprise someone days later.
+            self._full_requested = False
             if self.state not in (ChargeState.COMPLETE, ChargeState.STALLED):
                 await self._async_stop()
+            else:
+                await self._async_persist()
         elif new_state.state == "on" and self.state in _PLUG_OFF_STATES:
             await self._async_arm()
 
@@ -595,13 +711,14 @@ class ChargeLimiterCoordinator:
 
     async def _async_take_real_reading(self, soc: float) -> None:
         """A real reading beats the projection; a settled one can teach."""
-        changed = False
+        self._real_soc = soc
+        self._real_soc_at = dt_util.utcnow().timestamp()
+        self._schedule_freshness_expiry()
         if self.session_start_soc is not None and self.state not in (
             ChargeState.CHARGING,
             ChargeState.UNCALIBRATED,
         ):
             self.session_start_soc = None
-            changed = True
 
         pending = self._pending_calibration
         if pending is not None:
@@ -616,17 +733,14 @@ class ChargeLimiterCoordinator:
                 # have ended: the device has been used since, so no reading
                 # from now on can measure that charge. Drop the note.
                 self._pending_calibration = None
-                changed = True
             elif age >= self._rest_seconds and self._remember_charge(
                 pending["start_soc"], soc, pending["delivered_wh"], source="auto"
             ):
                 # Removed only once it has taught something. Too soon, or too
                 # small a rise, and it waits for better news instead.
                 self._pending_calibration = None
-                changed = True
 
-        if changed:
-            await self._async_persist()
+        await self._async_persist()
 
     async def _async_handle_power(
         self, power: float | None, event: Event[EventStateChangedData]
@@ -680,18 +794,14 @@ class ChargeLimiterCoordinator:
         # A note belongs to its own charge. Left in place, a later reading
         # could pair it with this one and teach something false.
         self._pending_calibration = None
-        soc_state = self.hass.states.get(self._soc_entity)
-        soc = _as_float(soc_state)
-        age = (
-            (dt_util.utcnow() - soc_state.last_updated).total_seconds()
-            if soc_state is not None
-            else None
-        )
+        full = self._full_requested
+        self._full_requested = False
+        soc = self._fresh_soc()
 
         self._session_started_at = dt_util.utcnow().timestamp()
         self._start_cap_timer()
 
-        if soc is None or age is None or age > self._staleness_seconds:
+        if soc is None:
             # A stale reading most likely means the device has been ridden
             # since, so the true charge is lower than recorded. Applying the
             # limit anyway would cut early and leave it short, so don't apply
@@ -703,7 +813,7 @@ class ChargeLimiterCoordinator:
             await self._async_persist()
             return
 
-        if soc >= self.target_soc:
+        if soc >= self.target_soc and not full:
             self._cancel_timers()
             self._set_state(ChargeState.COMPLETE)
             await self._async_switch_plug(False)
@@ -711,7 +821,11 @@ class ChargeLimiterCoordinator:
             return
 
         self.session_start_soc = soc
-        self.required_wh = energy_between(self.bands, soc, self.target_soc)
+        # A charge to full carries no cut-off: the charger ends it. It still
+        # starts from a known point, so it can teach like any other charge.
+        self.required_wh = (
+            None if full else energy_between(self.bands, soc, self.target_soc)
+        )
 
         energy_state = (
             self.hass.states.get(self._energy_entity) if self._energy_entity else None
@@ -722,6 +836,7 @@ class ChargeLimiterCoordinator:
 
         self._meter.start(baseline)
         self._set_state(ChargeState.CHARGING)
+        self._unlimited = full
         await self._async_persist()
 
     async def _async_check_target(self) -> None:
@@ -816,6 +931,10 @@ class ChargeLimiterCoordinator:
             self._set_state(ChargeState.COMPLETE)
             await self._async_switch_plug(False)
             await self._async_persist()
+        elif self.state is ChargeState.CHARGING and self._unlimited:
+            # A charge to full has no target to fall short of: the charger
+            # going quiet is how it completes.
+            await self._async_complete()
         elif self.state is ChargeState.CHARGING:
             # Interrupted before target, so no calibration. Just re-arm.
             self._pending_calibration = None
@@ -872,6 +991,9 @@ class ChargeLimiterCoordinator:
         if state is not self.state:
             _LOGGER.debug("%s -> %s", self.state, state)
         self.state = state
+        if state not in (ChargeState.CHARGING, ChargeState.UNCALIBRATED):
+            # A charge to full lasts one session, however that session ends.
+            self._unlimited = False
         self._notify()
 
     async def _async_switch_plug(self, on: bool) -> None:

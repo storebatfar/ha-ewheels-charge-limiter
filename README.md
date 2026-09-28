@@ -91,6 +91,11 @@ Every ambiguous case therefore resolves toward delivering more energy:
   since, so the real charge is *lower*; applying the limit anyway would cut
   early and leave you short. You may occasionally get a 100% charge as a
   result.
+- Only a **real** reading counts as fresh: a change from one number to another,
+  or a re-poll of the same value. After a reconnect or a Home Assistant
+  restart, the node replays the last value it knew with a brand-new timestamp;
+  that is old news, and it neither passes for fresh nor becomes the starting
+  point of a charge.
 - Losing the state-of-charge sensor mid-session does not abort — the value is
   only needed at the start and is already recorded.
 
@@ -100,9 +105,10 @@ live indefinitely, so the integration cuts power and reports `stalled`.
 
 ## Starting a charge is yours; ending one is the integration's
 
-**The integration never switches the plug on.** Its authority runs one way: it
-cuts power at the target, at the session cap, and if every meter dies. Closing
-the relay is always a deliberate act by you.
+**The integration never switches the plug on by itself.** Its authority runs
+one way: it cuts power at the target, at the session cap, and if every meter
+dies. Closing the relay is always a deliberate act by you — the `Plug` switch,
+the plug's own button, or `Charge to full`.
 
 So `armed` means "watching, ready to limit the next charge" — not "powered up
 and waiting". Home Assistant restarting, an option being edited, or the battery
@@ -115,14 +121,27 @@ on.
 
 ## The manual plug switch
 
-The `Plug` switch is an override, and it is authoritative. Turning it **on**
-starts a session regardless of the current charge — it deliberately bypasses
-the target, because "turn the plug on" should mean exactly that. Turning it
-**off** ends any open session. It mirrors the real plug, so it reads `off`
-while the limiter is merely armed.
+Turning the `Plug` switch **on** starts a charge limited to the target, like any
+other. If a fresh reading says the pack is already at the target, the limiter
+cuts it again within seconds: `Target reached` tells you beforehand. To charge
+past the target on purpose, use `Charge to full`. Turning it **off** ends any
+open session. It mirrors the real plug, so it reads `off` while the limiter is
+merely armed.
 
 Changes made anywhere else — the plug's own entity, its physical button, the
 vendor app — are detected and treated identically.
+
+## Charging past the target
+
+`Charge to full` switches the charger on for one charge that ignores the
+target and runs until the charger stops by itself; limiting resumes
+afterwards. Pressed during a charge, it lifts that charge's limit instead. Use
+it for a top-up above the target, or the occasional full charge a pack needs to
+balance its cells.
+
+If it started from a fresh reading, a full charge teaches the vase like any
+other — a known start to a real full is about the best calibration there is. A
+request that never became a charge lapses when the plug is switched off.
 
 ## Entities
 
@@ -131,6 +150,8 @@ vendor app — are detected and treated identically.
 | `number` Target charge | Target state of charge |
 | `switch` Enabled | Master enable; when off, the plug is left alone entirely |
 | `switch` Plug | Manual override, mirrors the real plug |
+| `button` Charge to full | One charge that ignores the target; switches the charger on |
+| `binary_sensor` Target reached | On when a fresh, real reading is at or above the target — the same test that makes a new charge stop straight away |
 | `sensor` Status | `idle`, `armed`, `charging`, `complete`, `stopped`, `uncalibrated`, `stalled` |
 | `sensor` Session energy | Watt-hours delivered this session |
 | `sensor` Charge power | What the plug is drawing right now; only when a power sensor is configured |

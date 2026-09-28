@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
+from freezegun.api import FrozenDateTimeFactory
 from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.setup import async_setup_component
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     MockToggleEntity,
+    async_fire_time_changed,
     setup_test_component_platform,
 )
 
@@ -378,3 +383,42 @@ async def test_record_charge_mid_session_can_cut_the_plug(hass: HomeAssistant):
 
     assert hass.states.get("sensor.scooter_status").state == "complete"
     assert hass.states.get(PLUG).state == "off"
+
+
+async def test_target_reached_sensor_follows_a_real_reading(hass: HomeAssistant):
+    await _setup(hass)
+    assert hass.states.get("binary_sensor.scooter_target_reached").state == "off"
+
+    hass.states.async_set(SOC, "85", {"unit_of_measurement": "%"})
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.scooter_target_reached").state == "on"
+
+
+async def test_target_reached_sensor_clears_when_the_reading_goes_stale(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+):
+    """Nothing else changes when a reading merely ages, so a timer must say so."""
+    await _setup(hass, soc_staleness_hours=12)
+    hass.states.async_set(SOC, "85", {"unit_of_measurement": "%"})
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.scooter_target_reached").state == "on"
+
+    freezer.tick(timedelta(hours=12, minutes=1))
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.scooter_target_reached").state == "off"
+
+
+async def test_charge_to_full_button_switches_the_plug_on(hass: HomeAssistant):
+    await _setup(hass)
+    await hass.services.async_call(
+        SWITCH_DOMAIN, "turn_off", {"entity_id": PLUG}, blocking=True
+    )
+    await hass.async_block_till_done()
+
+    await hass.services.async_call(
+        "button", "press", {"entity_id": "button.scooter_charge_to_full"}, blocking=True
+    )
+    await hass.async_block_till_done()
+
+    assert hass.states.get(PLUG).state == "on"

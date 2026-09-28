@@ -103,6 +103,12 @@
     }
   },
   "entity": {
+    "binary_sensor": {
+      "target_reached": { "name": "Target reached" }
+    },
+    "button": {
+      "charge_to_full": { "name": "Charge to full" }
+    },
     "sensor": {
       "status": { "name": "Status" },
       "session_energy": { "name": "Session energy" },
