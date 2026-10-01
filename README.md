@@ -183,6 +183,12 @@ watt-hours. You name the entities outright rather than picking a device: it is
 one screen either way, and nothing is inferred behind your back about which
 switch gets to cut mains.
 
+Versions are **year.month.number**, for example 2026.10.1. Releases before
+October 2026 were year.number (2026.2 to 2026.13), and 2026.13 compares higher
+than 2026.10.1, so HACS won't offer that one update by itself: coming from
+2026.11, 2026.12 or 2026.13, open the repository in HACS, choose **Redownload**
+and pick 2026.10.1. Every later release is offered normally.
+
 ## Changing the plug, meters or battery
 
 **Settings → Devices & Services → E-Wheels Charge Limiter → ⋮ → Reconfigure**
