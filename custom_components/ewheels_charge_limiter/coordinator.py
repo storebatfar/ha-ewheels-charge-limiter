@@ -44,6 +44,7 @@ from .const import (
     CONF_SOC_ENTITY,
     DEFAULT_CHARGING_POWER_THRESHOLD,
     DEFAULT_IDLE_CLOSE_MINUTES,
+    DEFAULT_LEARN_WINDOW_HOURS,
     DEFAULT_MAX_SESSION_HOURS,
     DEFAULT_REARM_HYSTERESIS,
     DEFAULT_REST_MINUTES,
@@ -53,6 +54,7 @@ from .const import (
     MAX_REMEMBERED_CHARGES,
     OPT_CHARGING_POWER_THRESHOLD,
     OPT_IDLE_CLOSE_MINUTES,
+    OPT_LEARN_WINDOW_HOURS,
     OPT_MAX_SESSION_HOURS,
     OPT_REARM_HYSTERESIS,
     OPT_REST_MINUTES,
@@ -245,6 +247,35 @@ class ChargeLimiterCoordinator:
             float(self.entry.options.get(OPT_REST_MINUTES, DEFAULT_REST_MINUTES))
             * 60.0
         )
+
+    @property
+    def _learn_window_seconds(self) -> float:
+        """How long after the cut a reading may still teach that charge.
+
+        Separate from staleness, which only says whether a start reading can
+        be trusted. Sharing it threw away every charge read more than 12 hours
+        after its cut - an evening charge checked the next afternoon. A long
+        window is safe because switching the device on to ride it sends a
+        reading first, and the shortfall check catches one that didn't.
+        """
+        return (
+            float(
+                self.entry.options.get(
+                    OPT_LEARN_WINDOW_HOURS, DEFAULT_LEARN_WINDOW_HOURS
+                )
+            )
+            * 3600.0
+        )
+
+    @property
+    def _charging_to_full(self) -> bool:
+        """True when the charger, not an estimate, ends this charge.
+
+        Either Charge to full was pressed, or the target is 100 %: only the
+        charger knows when a pack is full, and an estimate cuts it short in
+        the constant-current phase, before the taper that tops it off.
+        """
+        return self._unlimited or self.target_soc >= 100.0
 
     @property
     def session_delivered_wh(self) -> float:
@@ -605,18 +636,17 @@ class ChargeLimiterCoordinator:
         and the charge would run on to the old target.
 
         An uncalibrated session is deliberately left alone: it has no starting
-        point to measure from, which is exactly why it carries no limit. So is
-        a charge to full, which was asked to ignore the target.
+        point to measure from, which is exactly why it carries no limit. A
+        target moved to 100 % lifts the limit, and moved back below restores
+        it - except on a pressed Charge to full, which ignores the target.
         """
-        if (
-            self.state is not ChargeState.CHARGING
-            or self.session_start_soc is None
-            or self._unlimited
-        ):
+        if self.state is not ChargeState.CHARGING or self.session_start_soc is None:
             return
 
-        self.required_wh = energy_between(
-            self.bands, self.session_start_soc, self.target_soc
+        self.required_wh = (
+            None
+            if self._charging_to_full
+            else energy_between(self.bands, self.session_start_soc, self.target_soc)
         )
         await self._async_persist()
         await self._async_check_target()
@@ -724,7 +754,7 @@ class ChargeLimiterCoordinator:
         if pending is not None:
             age = dt_util.utcnow().timestamp() - pending.get("cut_at", 0.0)
             projected = pending.get("projected_end")
-            if age > self._staleness_seconds or (
+            if age > self._learn_window_seconds or (
                 age >= self._rest_seconds
                 and projected is not None
                 and soc < projected - PLAUSIBLE_SHORTFALL_PCT
@@ -821,10 +851,13 @@ class ChargeLimiterCoordinator:
             return
 
         self.session_start_soc = soc
+        self._unlimited = full
         # A charge to full carries no cut-off: the charger ends it. It still
         # starts from a known point, so it can teach like any other charge.
         self.required_wh = (
-            None if full else energy_between(self.bands, soc, self.target_soc)
+            None
+            if self._charging_to_full
+            else energy_between(self.bands, soc, self.target_soc)
         )
 
         energy_state = (
@@ -836,7 +869,6 @@ class ChargeLimiterCoordinator:
 
         self._meter.start(baseline)
         self._set_state(ChargeState.CHARGING)
-        self._unlimited = full
         await self._async_persist()
 
     async def _async_check_target(self) -> None:
@@ -931,7 +963,7 @@ class ChargeLimiterCoordinator:
             self._set_state(ChargeState.COMPLETE)
             await self._async_switch_plug(False)
             await self._async_persist()
-        elif self.state is ChargeState.CHARGING and self._unlimited:
+        elif self.state is ChargeState.CHARGING and self._charging_to_full:
             # A charge to full has no target to fall short of: the charger
             # going quiet is how it completes.
             await self._async_complete()

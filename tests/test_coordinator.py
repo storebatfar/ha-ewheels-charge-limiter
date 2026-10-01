@@ -728,12 +728,31 @@ async def test_a_post_ride_poll_above_the_start_does_not_teach(
     assert coordinator.bands == pytest.approx([720 / 100 / 0.87] * 10)
 
 
-async def test_a_note_expires_after_the_staleness_window(
+async def test_a_note_outlives_the_staleness_window(
     hass: HomeAssistant, freezer: FrozenDateTimeFactory
 ):
+    """Charged in the evening, switched on the next afternoon: still learned.
+
+    Staleness is about trusting a start reading. It used to expire the note
+    too, which threw away every charge read more than 12 hours after its cut.
+    """
     coordinator = await _coordinator(hass, soc_staleness_hours=12)
     await _complete_a_session(hass, coordinator)
     freezer.tick(timedelta(hours=13))
+
+    await _report_soc(hass, "85")
+    assert coordinator.remembered_charges == 1
+    assert coordinator._pending_calibration is None
+
+
+async def test_a_note_expires_after_the_learn_window(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+):
+    coordinator = await _coordinator(
+        hass, soc_staleness_hours=48, learn_window_hours=36
+    )
+    await _complete_a_session(hass, coordinator)
+    freezer.tick(timedelta(hours=37))
 
     await _report_soc(hass, "85")
     assert coordinator.remembered_charges == 0
@@ -1016,6 +1035,106 @@ async def test_a_full_charge_survives_a_reload(
 
     assert revived.state is ChargeState.CHARGING
     assert revived.required_wh is None
+
+
+# ---- a 100 % target is a charge to full ------------------------------------
+
+
+async def _charge_until_the_charger_stops(hass, freezer) -> None:
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    # Past the 497 Wh a 40 -> 100 % estimate would allow: still charging.
+    hass.states.async_set(ENERGY, "0.6", {"unit_of_measurement": "kWh"})
+    await hass.async_block_till_done()
+    assert hass.states.get(PLUG).state == "on"
+    hass.states.async_set(POWER, "0", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    freezer.tick(timedelta(minutes=11))
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+
+
+async def test_a_100_target_charges_without_a_limit(hass: HomeAssistant):
+    """Only the charger knows when the pack is full; an estimate cuts it short."""
+    coordinator = await _coordinator(hass, target_soc=100.0)
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    assert coordinator.state is ChargeState.CHARGING
+    assert coordinator.required_wh is None
+
+    hass.states.async_set(ENERGY, "1.0", {"unit_of_measurement": "kWh"})
+    await hass.async_block_till_done()
+    assert coordinator.state is ChargeState.CHARGING
+    assert hass.states.get(PLUG).state == "on"
+
+
+async def test_a_100_target_ends_when_the_charger_stops(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+):
+    coordinator = await _coordinator(hass, target_soc=100.0, idle_close_minutes=10)
+    await _charge_until_the_charger_stops(hass, freezer)
+
+    assert coordinator.state is ChargeState.COMPLETE
+    assert hass.states.get(PLUG).state == "off"
+    assert coordinator._pending_calibration["start_soc"] == pytest.approx(40.0)
+    assert coordinator._pending_calibration["delivered_wh"] == pytest.approx(600.0)
+
+
+async def test_a_100_target_charge_teaches(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+):
+    coordinator = await _coordinator(hass, target_soc=100.0, idle_close_minutes=10)
+    await _charge_until_the_charger_stops(hass, freezer)
+    freezer.tick(timedelta(minutes=31))
+
+    await _report_soc(hass, "100")
+    assert coordinator.remembered_charges == 1
+
+
+async def test_raising_the_target_to_100_mid_charge_lifts_the_limit(
+    hass: HomeAssistant,
+):
+    coordinator = await _coordinator(hass)
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    assert coordinator.required_wh is not None
+
+    await coordinator.async_set_target(100.0)
+    await hass.async_block_till_done()
+    hass.states.async_set(ENERGY, "0.4", {"unit_of_measurement": "kWh"})  # past 80 %
+    await hass.async_block_till_done()
+
+    assert coordinator.state is ChargeState.CHARGING
+    assert coordinator.required_wh is None
+
+
+async def test_lowering_the_target_from_100_mid_charge_restores_the_limit(
+    hass: HomeAssistant,
+):
+    coordinator = await _coordinator(hass, target_soc=100.0)
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    hass.states.async_set(ENERGY, "0.2", {"unit_of_measurement": "kWh"})
+    await hass.async_block_till_done()
+
+    await coordinator.async_set_target(80.0)
+    await hass.async_block_till_done()
+    assert coordinator.required_wh == pytest.approx(40 * 720 / 100 / 0.87)
+
+    hass.states.async_set(ENERGY, "0.4", {"unit_of_measurement": "kWh"})
+    await hass.async_block_till_done()
+    assert coordinator.state is ChargeState.COMPLETE
+    assert hass.states.get(PLUG).state == "off"
+
+
+async def test_a_full_pack_is_not_charged_at_a_100_target(hass: HomeAssistant):
+    coordinator = await _coordinator(hass, target_soc=100.0)
+    await _report_soc(hass, "100")
+    hass.states.async_set(POWER, "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+
+    assert coordinator.state is ChargeState.COMPLETE
+    assert hass.states.get(PLUG).state == "off"
 
 
 async def test_charge_to_full_while_disabled_just_switches_the_plug_on(

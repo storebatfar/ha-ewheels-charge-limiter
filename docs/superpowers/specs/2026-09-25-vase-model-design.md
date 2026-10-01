@@ -148,7 +148,7 @@ not just the new value.
 | Stale | old state was `unavailable`, `unknown`, or missing |
 | Early | real, but `now − cut_at < rest_minutes` |
 | Settled | real, and `now − cut_at ≥ rest_minutes` |
-| Used since | real, and either `now − cut_at > soc_staleness_hours`, or settled but more than 15 points below `projected_end` (`PLAUSIBLE_SHORTFALL_PCT`) |
+| Used since | real, and either `now − cut_at > learn_window_hours` (`soc_staleness_hours` until 2026.10.1), or settled but more than 15 points below `projected_end` (`PLAUSIBLE_SHORTFALL_PCT`) |
 
 `rest_minutes` is a new option, **Wait before learning (minutes)**, default 30.
 

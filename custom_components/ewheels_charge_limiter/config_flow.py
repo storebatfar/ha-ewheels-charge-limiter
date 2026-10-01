@@ -28,6 +28,7 @@ from .const import (
     CONF_SOC_ENTITY,
     DEFAULT_CHARGING_POWER_THRESHOLD,
     DEFAULT_IDLE_CLOSE_MINUTES,
+    DEFAULT_LEARN_WINDOW_HOURS,
     DEFAULT_MAX_SESSION_HOURS,
     DEFAULT_REARM_HYSTERESIS,
     DEFAULT_REST_MINUTES,
@@ -37,6 +38,7 @@ from .const import (
     OPT_CHARGING_POWER_THRESHOLD,
     OPT_FORGET_CHARGES,
     OPT_IDLE_CLOSE_MINUTES,
+    OPT_LEARN_WINDOW_HOURS,
     OPT_MAX_SESSION_HOURS,
     OPT_REARM_HYSTERESIS,
     OPT_REST_MINUTES,
@@ -160,6 +162,7 @@ def _default_options() -> dict[str, Any]:
         OPT_MAX_SESSION_HOURS: DEFAULT_MAX_SESSION_HOURS,
         OPT_SOC_STALENESS_HOURS: DEFAULT_SOC_STALENESS_HOURS,
         OPT_REST_MINUTES: DEFAULT_REST_MINUTES,
+        OPT_LEARN_WINDOW_HOURS: DEFAULT_LEARN_WINDOW_HOURS,
     }
 
 
@@ -345,6 +348,14 @@ class EWheelsChargeLimiterOptionsFlow(OptionsFlow):
                     default=options.get(OPT_REST_MINUTES, DEFAULT_REST_MINUTES),
                 ): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=0, max=240, step=1)
+                ),
+                vol.Required(
+                    OPT_LEARN_WINDOW_HOURS,
+                    default=options.get(
+                        OPT_LEARN_WINDOW_HOURS, DEFAULT_LEARN_WINDOW_HOURS
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=1, max=168, step=1)
                 ),
             }
         )

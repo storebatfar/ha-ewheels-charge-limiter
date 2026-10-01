@@ -71,9 +71,15 @@ It only learns from a reading it can trust:
   from.
 - **Enough signal.** A charge must rise at least 10 points.
 - **Not used since.** A reading more than 15 points below where the charge
-  should have ended, or taken after *Treat a reading as stale after* (12 hours
-  by default), means the scooter has been ridden since. That charge is
-  abandoned rather than learned wrongly.
+  should have ended means the scooter has been ridden since, and so does one
+  taken after *Learn from a charge for up to* (36 hours by default). That
+  charge is abandoned rather than learned wrongly.
+
+The learning window is long on purpose. Switching the scooter on to ride it
+sends a reading before you set off, so the first reading after a charge is
+normally a rested one, whether it comes that night or the next afternoon. Until
+2026.10.1 the window was *Treat a reading as stale after* (12 hours), which
+meant an evening charge checked the next afternoon was never learned.
 
 A reading that is too soon or too small a rise leaves the charge waiting for a
 better one, and re-reading the same value later counts. A new charge starting throws away any charge still waiting.
@@ -132,6 +138,13 @@ Changes made anywhere else — the plug's own entity, its physical button, the
 vendor app — are detected and treated identically.
 
 ## Charging past the target
+
+A **target of 100 %** means no estimate at all: every charge runs until the
+charger stops by itself, then the plug is switched off once the power has been
+quiet for *Close session after idle*. An estimate can only cut in the
+constant-current phase, before the taper that actually tops the pack off, so a
+limited "100 %" charge always lands a few points short. Moving the target to
+100 % during a charge lifts its limit; moving it back below restores it.
 
 `Charge to full` switches the charger on for one charge that ignores the
 target and runs until the charger stops by itself; limiting resumes
@@ -202,7 +215,10 @@ Two things to know:
 | Maximum session length | 8 h |
 | Treat a reading as stale after | 12 h |
 | Wait before learning | 30 min |
+| Learn from a charge for up to | 36 h |
 | Vase values (per 10-point band) | blank: the default starting point |
+
+Every option is explained on the options screen itself.
 
 ## Actions
 

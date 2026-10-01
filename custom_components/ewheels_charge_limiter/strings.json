@@ -63,6 +63,11 @@
         "menu_options": {
           "settings": "Settings",
           "vase": "Vase values (Wh per point)"
+        },
+        "description": "Settings decide when a charge is cut and which battery readings it learns from. Vase values show the energy model behind the cut-off, and let you adjust or reset it.",
+        "menu_option_descriptions": {
+          "settings": "Target, charger detection, timings and the learning window.",
+          "vase": "Wall Wh per percentage point for each 10-point band: what has been learned, typed starting points, and forgetting charges."
         }
       },
       "settings": {
@@ -74,11 +79,20 @@
           "idle_close_minutes": "Close session after idle (minutes)",
           "max_session_hours": "Maximum session length (hours)",
           "soc_staleness_hours": "Treat a reading as stale after (hours)",
-          "rest_minutes": "Wait before learning (minutes)"
+          "rest_minutes": "Wait before learning (minutes)",
+          "learn_window_hours": "Learn from a charge for up to (hours)"
         },
         "data_description": {
-          "rest_minutes": "A battery reads high straight after charging. Readings taken sooner than this after the plug is cut are shown but not learned from."
-        }
+          "target_soc": "Where a charge stops. Below 100 % it is cut by the learned estimate. At 100 % there is no estimate: the charger ends the charge and the plug is switched off after the idle time below. Also adjustable from the Target charge entity.",
+          "rearm_hysteresis": "How far below the target a new reading must be before the limiter arms for the next charge. Stops it re-arming on the small drop a pack shows as it settles.",
+          "charging_power_threshold": "Power above this means the charger is charging; at or below it counts as quiet. Set it above what the charger draws when idle or finished.",
+          "idle_close_minutes": "How long the power must stay quiet before a session counts as over. At a 100 % target or after Charge to full, this is how the end of the charge is detected and the plug cut.",
+          "max_session_hours": "Safety cut-off: a session running longer than this is stopped and the plug switched off, whatever else is happening. Leave room for a full charge from empty.",
+          "soc_staleness_hours": "How old a battery reading may be and still be trusted as the starting point of a charge. Older than this, the device may have been ridden since, so the charge runs without a limit and teaches nothing.",
+          "rest_minutes": "A battery reads high straight after charging. Readings taken sooner than this after the plug is cut are shown but not learned from.",
+          "learn_window_hours": "How long after the plug is cut a battery reading can still teach what that charge cost. A reading more than 15 points below where the charge should have ended is taken as ridden since and ignored."
+        },
+        "description": "Below a 100 % target, the limiter cuts the plug once the energy it has learned the remaining points cost has gone in. At 100 % it doesn't estimate: the charger ends the charge, and the plug is cut once it goes quiet.\n\nIt learns from a charge when the device reports its battery after the plug is cut - at rest, so no sooner than the rest time, and before it is ridden, within the learning window. Switching the device on near its Bluetooth link is enough."
       },
       "vase": {
         "title": "Vase values",
@@ -97,31 +111,61 @@
           "forget_charges": "Forget remembered charges"
         },
         "data_description": {
-          "forget_charges": "Drops every remembered charge, so the bands fall back to their starting points. Use it if a charge taught something wrong."
+          "forget_charges": "Drops every remembered charge, so the bands fall back to their starting points. Use it if a charge taught something wrong.",
+          "band_0": "Starting point for this band, in wall Wh per reported point. Leave blank to start from the default; learning refines it either way.",
+          "band_1": "Starting point for this band, in wall Wh per reported point. Leave blank to start from the default; learning refines it either way.",
+          "band_2": "Starting point for this band, in wall Wh per reported point. Leave blank to start from the default; learning refines it either way.",
+          "band_3": "Starting point for this band, in wall Wh per reported point. Leave blank to start from the default; learning refines it either way.",
+          "band_4": "Starting point for this band, in wall Wh per reported point. Leave blank to start from the default; learning refines it either way.",
+          "band_5": "Starting point for this band, in wall Wh per reported point. Leave blank to start from the default; learning refines it either way.",
+          "band_6": "Starting point for this band, in wall Wh per reported point. Leave blank to start from the default; learning refines it either way.",
+          "band_7": "Starting point for this band, in wall Wh per reported point. Leave blank to start from the default; learning refines it either way.",
+          "band_8": "Starting point for this band, in wall Wh per reported point. Leave blank to start from the default; learning refines it either way.",
+          "band_9": "Starting point for this band, in wall Wh per reported point. Leave blank to start from the default; learning refines it either way."
         }
       }
     }
   },
   "entity": {
     "binary_sensor": {
-      "target_reached": { "name": "Target reached" }
+      "target_reached": {
+        "name": "Target reached"
+      }
     },
     "button": {
-      "charge_to_full": { "name": "Charge to full" }
+      "charge_to_full": {
+        "name": "Charge to full"
+      }
     },
     "sensor": {
-      "status": { "name": "Status" },
-      "session_energy": { "name": "Session energy" },
-      "charge_power": { "name": "Charge power" },
-      "projected_soc": { "name": "Projected charge" },
-      "wh_per_percent": { "name": "Wh per percent" }
+      "status": {
+        "name": "Status"
+      },
+      "session_energy": {
+        "name": "Session energy"
+      },
+      "charge_power": {
+        "name": "Charge power"
+      },
+      "projected_soc": {
+        "name": "Projected charge"
+      },
+      "wh_per_percent": {
+        "name": "Wh per percent"
+      }
     },
     "switch": {
-      "enabled": { "name": "Enabled" },
-      "plug": { "name": "Plug" }
+      "enabled": {
+        "name": "Enabled"
+      },
+      "plug": {
+        "name": "Plug"
+      }
     },
     "number": {
-      "target": { "name": "Target charge" }
+      "target": {
+        "name": "Target charge"
+      }
     }
   },
   "services": {

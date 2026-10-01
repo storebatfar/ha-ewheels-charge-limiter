@@ -20,6 +20,7 @@ from custom_components.ewheels_charge_limiter.const import (
     CONF_SOC_ENTITY,
     DEFAULT_TARGET_SOC,
     DOMAIN,
+    OPT_LEARN_WINDOW_HOURS,
     OPT_REST_MINUTES,
     OPT_TARGET_SOC,
 )
@@ -157,6 +158,7 @@ async def test_options_flow_updates_the_target(hass: HomeAssistant):
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][OPT_TARGET_SOC] == 90.0
     assert result["data"][OPT_REST_MINUTES] == 30
+    assert result["data"][OPT_LEARN_WINDOW_HOURS] == 36
 
 
 async def test_vase_step_stores_typed_bands_and_drops_cleared_ones(
