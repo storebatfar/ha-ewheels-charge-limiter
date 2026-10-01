@@ -714,6 +714,75 @@ async def test_a_restart_inside_the_rest_window_still_learns(
     assert revived.remembered_charges == 1
 
 
+async def _restart(hass: HomeAssistant, coordinator, plug: str) -> ChargeLimiterCoordinator:
+    """Shut down and come back the way HA does: the plug reappears late."""
+    await coordinator.async_shutdown()
+    hass.states.async_set(PLUG, STATE_UNAVAILABLE)
+    revived = ChargeLimiterCoordinator(hass, coordinator.entry)
+    await revived.async_setup()
+    await hass.async_block_till_done()
+    hass.states.async_set(PLUG, plug)
+    await hass.async_block_till_done()
+    return revived
+
+
+async def test_a_restart_after_a_charge_keeps_it_complete(
+    hass: HomeAssistant, hass_storage
+):
+    """Coming back, the plug reporting off is not someone stopping a charge."""
+    coordinator = await _coordinator(hass)
+    await _complete_a_session(hass, coordinator)
+
+    revived = await _restart(hass, coordinator, "off")
+
+    assert revived.state is ChargeState.COMPLETE
+    assert revived._pending_calibration is not None
+
+
+async def test_a_restart_between_the_cut_and_the_reading_still_learns(
+    hass: HomeAssistant, hass_storage, freezer: FrozenDateTimeFactory
+):
+    coordinator = await _coordinator(hass)
+    await _complete_a_session(hass, coordinator)
+    revived = await _restart(hass, coordinator, "off")
+    freezer.tick(timedelta(hours=2))
+
+    await _report_soc(hass, "85")
+    assert revived.remembered_charges == 1
+
+
+async def test_a_restart_with_the_plug_on_arms(hass: HomeAssistant, hass_storage):
+    coordinator = await _coordinator(hass)
+    await _complete_a_session(hass, coordinator)
+    hass.states.async_set(PLUG, "on")  # switched on while HA was down
+    await hass.async_block_till_done()
+
+    revived = ChargeLimiterCoordinator(hass, coordinator.entry)
+    await coordinator.async_shutdown()
+    await revived.async_setup()
+    await hass.async_block_till_done()
+
+    assert revived.state is ChargeState.ARMED
+    assert revived._pending_calibration is not None
+
+
+async def test_switching_an_idle_plug_off_keeps_the_waiting_charge(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+):
+    """On and off again with no charge in between cuts nothing short."""
+    coordinator = await _coordinator(hass)
+    await _complete_a_session(hass, coordinator)
+    await coordinator.async_set_plug(True)
+    await hass.async_block_till_done()
+    await coordinator.async_set_plug(False)
+    await hass.async_block_till_done()
+    assert coordinator.state is ChargeState.STOPPED
+    freezer.tick(timedelta(hours=2))
+
+    await _report_soc(hass, "85")
+    assert coordinator.remembered_charges == 1
+
+
 async def test_a_post_ride_poll_above_the_start_does_not_teach(
     hass: HomeAssistant, freezer: FrozenDateTimeFactory
 ):

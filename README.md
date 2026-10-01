@@ -119,7 +119,9 @@ the plug's own button, or `Charge to full`.
 So `armed` means "watching, ready to limit the next charge" — not "powered up
 and waiting". Home Assistant restarting, an option being edited, or the battery
 falling below the re-arm threshold will all arm the limiter, and none of them
-will start a charge.
+will start a charge. The exception is a restart after a charge has finished
+with the plug still off: the limiter stays `complete` (or `stopped`), and a
+charge waiting to be learned keeps waiting.
 
 The trade-off is worth stating plainly: after a charge completes the plug stays
 off, so plugging the scooter in overnight does nothing until you switch the plug

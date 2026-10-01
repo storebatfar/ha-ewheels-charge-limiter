@@ -455,6 +455,13 @@ class ChargeLimiterCoordinator:
             self._start_cap_timer()
             return
 
+        if self.state in _PLUG_OFF_STATES and not self.plug_is_on:
+            # A charge ended before the restart and the plug is still off (or
+            # not reporting yet). Arming here made the plug's late "off" look
+            # like a manual stop, which threw away the charge waiting to be
+            # learned. Switching the plug on arms as usual.
+            return
+
         await self._async_arm()
 
     async def async_shutdown(self) -> None:
@@ -893,9 +900,13 @@ class ChargeLimiterCoordinator:
         await self._async_persist()
 
     async def _async_stop(self) -> None:
-        """Ended by hand. No calibration: the session was cut short."""
+        """Ended by hand. No calibration: the session was cut short.
+
+        A cut-short session never wrote a note, so there is none of its own to
+        drop. A note still here belongs to the charge before, and switching an
+        idle plug off says nothing about that one.
+        """
         self._cancel_timers()
-        self._pending_calibration = None
         self.required_wh = None
         self.session_start_soc = None
         self._session_started_at = None
