@@ -51,6 +51,7 @@ from .const import (
     DEFAULT_SOC_STALENESS_HOURS,
     DEFAULT_TARGET_SOC,
     DOMAIN,
+    DROPOUT_GRACE_SECONDS,
     MAX_REMEMBERED_CHARGES,
     OPT_CHARGING_POWER_THRESHOLD,
     OPT_IDLE_CLOSE_MINUTES,
@@ -62,6 +63,7 @@ from .const import (
     OPT_TARGET_SOC,
     PLAUSIBLE_SHORTFALL_PCT,
     STORAGE_VERSION,
+    TAPER_FRACTION,
     ChargeState,
 )
 from .energy_meter import EnergyMeter
@@ -170,6 +172,8 @@ class ChargeLimiterCoordinator:
         self._meter = EnergyMeter()
         self._pending_calibration: dict[str, float] | None = None
         self._session_started_at: float | None = None
+        self._peak_power_w: float | None = None
+        self._last_charging_power_w: float | None = None
 
         # The last reading the pack really gave, as opposed to a value the
         # node replays after a reconnect with a fresh timestamp.
@@ -185,6 +189,7 @@ class ChargeLimiterCoordinator:
         )
         self._cancel_idle: Callable[[], None] | None = None
         self._cancel_cap: Callable[[], None] | None = None
+        self._cancel_dropout: Callable[[], None] | None = None
         self._unsubscribes: list[Callable[[], None]] = []
         self._listeners: list[Callable[[], None]] = []
 
@@ -453,6 +458,7 @@ class ChargeLimiterCoordinator:
             # Resume, do not restart. Restarting would zero the watt-hour count
             # and overcharge by however much was already delivered.
             self._start_cap_timer()
+            self._track_dropout()
             return
 
         if self.state in _PLUG_OFF_STATES and not self.plug_is_on:
@@ -483,6 +489,8 @@ class ChargeLimiterCoordinator:
         self.required_wh = stored.get("required_wh")
         self.session_start_soc = stored.get("session_start_soc")
         self._session_started_at = stored.get("session_started_at")
+        self._peak_power_w = stored.get("peak_power_w")
+        self._last_charging_power_w = stored.get("last_charging_power_w")
         self._pending_calibration = stored.get("pending_calibration")
         self._real_soc = stored.get("real_soc")
         self._real_soc_at = stored.get("real_soc_at")
@@ -506,6 +514,8 @@ class ChargeLimiterCoordinator:
             "required_wh": self.required_wh,
             "session_start_soc": self.session_start_soc,
             "session_started_at": self._session_started_at,
+            "peak_power_w": self._peak_power_w,
+            "last_charging_power_w": self._last_charging_power_w,
             "pending_calibration": self._pending_calibration,
             "real_soc": self._real_soc,
             "real_soc_at": self._real_soc_at,
@@ -671,20 +681,6 @@ class ChargeLimiterCoordinator:
         entity_id = event.data["entity_id"]
         new_state = event.data["new_state"]
 
-        if (
-            self.state in (ChargeState.CHARGING, ChargeState.UNCALIBRATED)
-            and not self._has_live_meter()
-        ):
-            # With no meter the count can never advance, so the target would
-            # never be reached and the plug would stay live indefinitely. The
-            # one case that deliberately fails toward undercharged.
-            _LOGGER.warning("Lost every meter mid-session; cutting the plug")
-            self._cancel_timers()
-            self._set_state(ChargeState.STALLED)
-            await self._async_switch_plug(False)
-            await self._async_persist()
-            return
-
         if entity_id == self._plug_switch:
             await self._async_handle_plug(new_state)
         elif entity_id == self._soc_entity:
@@ -694,15 +690,14 @@ class ChargeLimiterCoordinator:
         elif entity_id == self._energy_entity:
             await self._async_handle_energy(new_state)
 
+        self._track_dropout()
         self._notify()
 
     async def _async_handle_plug(self, new_state: Any) -> None:
         """React to the plug switching, whoever switched it."""
         if new_state is None or new_state.state in _INVALID:
-            if self.state not in _PLUG_OFF_STATES:
-                self._cancel_timers()
-                self._set_state(ChargeState.STALLED)
-                await self._async_persist()
+            # An open charge rides it out in _track_dropout; with none open
+            # there is nothing to protect.
             return
 
         if new_state.state == "off":
@@ -789,6 +784,9 @@ class ChargeLimiterCoordinator:
             await self._async_open_session()
 
         if self.state in (ChargeState.CHARGING, ChargeState.UNCALIBRATED):
+            if power > self._power_threshold:
+                self._peak_power_w = max(self._peak_power_w or 0.0, power)
+                self._last_charging_power_w = power
             if power <= self._power_threshold:
                 # A dip is not an ending; only sustained silence is.
                 self._restart_idle_timer()
@@ -836,6 +834,8 @@ class ChargeLimiterCoordinator:
         soc = self._fresh_soc()
 
         self._session_started_at = dt_util.utcnow().timestamp()
+        self._peak_power_w = None
+        self._last_charging_power_w = None
         self._start_cap_timer()
 
         if soc is None:
@@ -922,6 +922,9 @@ class ChargeLimiterCoordinator:
         if self._cancel_cap is not None:
             self._cancel_cap()
             self._cancel_cap = None
+        if self._cancel_dropout is not None:
+            self._cancel_dropout()
+            self._cancel_dropout = None
 
     def _restart_cap_timer(self) -> None:
         """Re-arm the cap so a changed maximum length applies to this session."""
@@ -974,15 +977,63 @@ class ChargeLimiterCoordinator:
             self._set_state(ChargeState.COMPLETE)
             await self._async_switch_plug(False)
             await self._async_persist()
-        elif self.state is ChargeState.CHARGING and self._charging_to_full:
+        elif self.state is ChargeState.CHARGING and (
+            self._charging_to_full or self._charger_finished
+        ):
             # A charge to full has no target to fall short of: the charger
-            # going quiet is how it completes.
+            # going quiet is how it completes. A limited charge the charger
+            # finished first is just as full, and re-arming would leave the
+            # plug live all night.
             await self._async_complete()
         elif self.state is ChargeState.CHARGING:
             # Interrupted before target, so no calibration. Just re-arm.
             self._pending_calibration = None
             await self._async_arm()
         self._notify()
+
+    @callback
+    def _track_dropout(self) -> None:
+        """Hold an open charge through a short outage of the plug or its meters.
+
+        The charger carries on regardless, and the energy sensor is cumulative,
+        so once the plug is back the count simply continues. Stalling at the
+        first blink restarted the count from zero against the old starting
+        reading, and the charge ran far past its target.
+        """
+        out = self.plug_is_on is None or not self._has_live_meter()
+        if out and self.state in (ChargeState.CHARGING, ChargeState.UNCALIBRATED):
+            if self._cancel_dropout is None:
+                self._cancel_dropout = async_call_later(
+                    self.hass, DROPOUT_GRACE_SECONDS, self._on_dropout
+                )
+        elif self._cancel_dropout is not None:
+            self._cancel_dropout()
+            self._cancel_dropout = None
+
+    @callback
+    def _on_dropout(self, _now: Any) -> None:
+        self._cancel_dropout = None
+        self.hass.async_create_task(self._async_dropout_fired())
+
+    async def _async_dropout_fired(self) -> None:
+        if self.state not in (ChargeState.CHARGING, ChargeState.UNCALIBRATED):
+            return
+        self._cancel_timers()
+        self._set_state(ChargeState.STALLED)
+        if not self._has_live_meter():
+            # With no meter the count can never advance, so the target would
+            # never be reached and the plug would stay live indefinitely. The
+            # one case that deliberately fails toward undercharged.
+            _LOGGER.warning("Lost every meter mid-session; cutting the plug")
+            await self._async_switch_plug(False)
+        await self._async_persist()
+
+    @property
+    def _charger_finished(self) -> bool:
+        """True when power tapered off before going quiet: the charger ended it."""
+        if self._peak_power_w is None or self._last_charging_power_w is None:
+            return False
+        return self._last_charging_power_w <= TAPER_FRACTION * self._peak_power_w
 
     # ---- helpers -------------------------------------------------------
 

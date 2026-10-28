@@ -105,9 +105,20 @@ Every ambiguous case therefore resolves toward delivering more energy:
 - Losing the state-of-charge sensor mid-session does not abort — the value is
   only needed at the start and is already recorded.
 
-There is exactly one deliberate exception. If **every** meter becomes
-unavailable mid-session, the count can never advance and the plug would stay
-live indefinitely, so the integration cuts power and reports `stalled`.
+- A Wi-Fi plug that drops off the network for a moment does not end the
+  charge. The charger keeps running and the energy sensor keeps counting, so
+  an open charge waits up to 5 minutes for the plug to come back and then
+  carries on where it was.
+- A limited charge that the charger finishes first, with the power tapering
+  off before it goes quiet, means the pack is full: the plug is switched off
+  as if the target had been reached. Power dropping straight from full to
+  nothing looks like a pulled cable instead, and the limiter re-arms with the
+  plug on.
+
+There is exactly one deliberate exception. If **every** meter stays
+unavailable for more than those 5 minutes mid-session, the count can never
+advance and the plug would stay live indefinitely, so the integration cuts
+power and reports `stalled`.
 
 ## Starting a charge is yours; ending one is the integration's
 

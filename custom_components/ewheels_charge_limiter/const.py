@@ -60,6 +60,13 @@ MAX_REMEMBERED_CHARGES = 10
 # the device has been used since, so it no longer measures that charge.
 PLAUSIBLE_SHORTFALL_PCT = 15.0
 
+# A Wi-Fi plug blinks off the network for seconds at a time while the charger
+# keeps running. An open charge waits this long for it before stalling.
+DROPOUT_GRACE_SECONDS = 300
+# Power gone quiet after falling to this share of the charge's peak means the
+# charger tapered and finished by itself; from near peak, the cable was pulled.
+TAPER_FRACTION = 0.5
+
 STORAGE_VERSION = 2
 
 
